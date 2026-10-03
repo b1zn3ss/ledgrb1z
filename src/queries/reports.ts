@@ -250,6 +250,60 @@ export async function getCashFlowSummary(
   }));
 }
 
+export interface ToolCashFlowPeriod {
+  period: string;
+  incomeCents: number;
+  outflowCents: number;
+  netCashFlowCents: number;
+}
+
+export interface ToolCashFlowSummary {
+  dateFrom: string;
+  dateTo: string;
+  incomeCents: number;
+  outflowCents: number;
+  netCashFlowCents: number;
+  savingsRatePct: number | null;
+  periods: ToolCashFlowPeriod[];
+}
+
+/**
+ * Read-only tool DTO over the canonical Cash Flow report query. This adapter
+ * only renames cent fields and derives range totals from the returned periods;
+ * transaction inclusion remains wholly owned by getCashFlowSummary.
+ */
+export async function getToolCashFlowSummary(
+  householdId: string,
+  filters: ReportFilters,
+  db: LedgrDb = defaultDb,
+): Promise<ToolCashFlowSummary> {
+  const periods = (await getCashFlowSummary(householdId, filters, db))
+    .map((row) => ({
+      period: row.period,
+      incomeCents: row.income,
+      outflowCents: row.expenses,
+      netCashFlowCents: row.net,
+    }))
+    .sort((a, b) => a.period.localeCompare(b.period));
+  const incomeCents = periods.reduce((total, period) => total + period.incomeCents, 0);
+  const outflowCents = periods.reduce((total, period) => total + period.outflowCents, 0);
+  const netCashFlowCents = periods.reduce(
+    (total, period) => total + period.netCashFlowCents,
+    0,
+  );
+
+  return {
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+    incomeCents,
+    outflowCents,
+    netCashFlowCents,
+    savingsRatePct:
+      incomeCents === 0 ? null : (netCashFlowCents / incomeCents) * 100,
+    periods,
+  };
+}
+
 export async function getCategoryTrends(
   householdId: string,
   filters: ReportFilters,
