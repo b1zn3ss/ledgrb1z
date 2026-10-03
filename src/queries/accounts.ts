@@ -4,6 +4,7 @@ import { accounts, bankConnections, institutionLogos, transactions, ACCOUNT_TYPE
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted, countRows } from "@/lib/query-helpers";
 import { classifyAccountType } from "@/lib/account-utils";
+import { groupAccountsByType } from "@/lib/group-accounts-by-type";
 
 export async function getAccounts(householdId: string, db: LedgrDb = defaultDb) {
   const scoped = scopedQuery(householdId, db);
@@ -197,6 +198,95 @@ export async function getAccountSummary(
     // Plain sum, not `assets - liabilities`: the signs already carry the
     // direction. Subtracting a negative liability would ADD the debt.
     netWorth: totalAssets + totalLiabilities,
+  };
+}
+
+export interface ToolDebtGroup {
+  type: "credit" | "loan";
+  label: string;
+  liabilityBalanceCents: number;
+  debtCents: number;
+}
+
+export interface ToolDebtAccount {
+  id: string;
+  name: string;
+  officialName: string | null;
+  type: "credit" | "loan";
+  subtype: string | null;
+  institution: string | null;
+  currentBalanceCents: number | null;
+  availableBalanceCents: number | null;
+  creditLimitCents: number | null;
+  currency: string | null;
+  isManual: boolean;
+}
+
+export interface ToolDebtSummary {
+  totalLiabilityBalanceCents: number;
+  totalDebtCents: number;
+  groups: ToolDebtGroup[];
+  accounts: ToolDebtAccount[];
+}
+
+/**
+ * Read-only debt DTO over the same account summary and grouping helpers used
+ * by the Accounts page. Balances remain signed; debt fields are display
+ * magnitudes using the page's Math.abs convention.
+ */
+export async function getToolDebtSummary(
+  householdId: string,
+  db: LedgrDb = defaultDb,
+): Promise<ToolDebtSummary> {
+  const [institutionGroups, summary] = await Promise.all([
+    getAccountsByInstitution(householdId, db),
+    getAccountSummary(householdId, db),
+  ]);
+  const grouped = groupAccountsByType(
+    institutionGroups.flatMap((institution) =>
+      institution.accounts.map((account) => ({
+        ...account,
+        institutionName: institution.institutionName,
+      })),
+    ),
+  ).filter(
+    (group): group is typeof group & { key: "credit" | "loan" } =>
+      group.key === "credit" || group.key === "loan",
+  );
+
+  const groups = grouped.map((group) => ({
+    type: group.key,
+    label: group.label,
+    liabilityBalanceCents: group.subtotal,
+    debtCents: Math.abs(group.subtotal),
+  }));
+  const debtAccounts = grouped
+    .flatMap((group) => group.accounts)
+    .map((account) => ({
+      id: account.id,
+      name: account.name,
+      officialName: account.officialName,
+      type: account.type as "credit" | "loan",
+      subtype: account.subtype,
+      institution: account.bankConnectionId ? account.institutionName : null,
+      currentBalanceCents: account.currentBalance,
+      availableBalanceCents: account.availableBalance,
+      creditLimitCents: account.creditLimit,
+      currency: account.currency,
+      isManual: account.isManual ?? false,
+    }))
+    .sort(
+      (a, b) =>
+        Math.abs(b.currentBalanceCents ?? 0) -
+          Math.abs(a.currentBalanceCents ?? 0) ||
+        a.id.localeCompare(b.id),
+    );
+
+  return {
+    totalLiabilityBalanceCents: summary.totalLiabilities,
+    totalDebtCents: Math.abs(summary.totalLiabilities),
+    groups,
+    accounts: debtAccounts,
   };
 }
 
