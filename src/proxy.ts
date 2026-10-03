@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
+import { isFinanceToolPath } from "@/lib/tools/finance-tool-paths";
 
 const publicPaths = ["/login", "/signup", "/api/auth", "/api/health", "/api/plaid/oauth-return", "/api/plaid/webhook", "/.well-known", "/api/mcp", "/manifest.json", "/robots.txt"];
 
@@ -7,6 +8,13 @@ export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (publicPaths.some((p) => pathname.startsWith(p))) {
+    return NextResponse.next();
+  }
+
+  // Only these six routes may use machine bearer authentication. Let every
+  // Authorization value reach the route so malformed/invalid credentials get
+  // a JSON 401 there; all other routes retain cookie-only proxy protection.
+  if (isFinanceToolPath(pathname) && request.headers.has("Authorization")) {
     return NextResponse.next();
   }
 

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getHouseholdId: vi.fn(),
   getToolAccounts: vi.fn(),
-  withHousehold: vi.fn(),
+  withReadOnlyHousehold: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/session", () => ({
@@ -11,7 +11,7 @@ vi.mock("@/lib/auth/session", () => ({
 }));
 
 vi.mock("@/lib/household-context", () => ({
-  withHousehold: mocks.withHousehold,
+  withReadOnlyHousehold: mocks.withReadOnlyHousehold,
 }));
 
 vi.mock("@/queries/accounts", () => ({
@@ -22,7 +22,7 @@ describe("GET /api/tools/accounts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getHouseholdId.mockResolvedValue("household-active");
-    mocks.withHousehold.mockImplementation(async (householdId, work) =>
+    mocks.withReadOnlyHousehold.mockImplementation(async (householdId, work) =>
       work({ householdId }),
     );
   });
@@ -43,7 +43,7 @@ describe("GET /api/tools/accounts", () => {
     ]);
 
     const { GET } = await import("./route");
-    const response = await GET();
+    const response = await GET(new Request('http://localhost/api/tools/accounts'));
 
     expect(response.headers.get("content-type")).toContain("application/json");
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -56,11 +56,11 @@ describe("GET /api/tools/accounts", () => {
     mocks.getToolAccounts.mockResolvedValue([]);
 
     const route = await import("./route");
-    const response = await route.GET();
+    const response = await route.GET(new Request('http://localhost/api/tools/accounts'));
 
     expect(await response.json()).toEqual({ accounts: [] });
     expect(mocks.getHouseholdId).toHaveBeenCalledOnce();
-    expect(mocks.withHousehold).toHaveBeenCalledWith(
+    expect(mocks.withReadOnlyHousehold).toHaveBeenCalledWith(
       "household-active",
       expect.any(Function),
     );

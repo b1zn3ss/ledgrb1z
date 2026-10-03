@@ -1,27 +1,21 @@
-import { NextResponse } from "next/server";
-import { getHouseholdId } from "@/lib/auth/session";
-import { withHousehold } from "@/lib/household-context";
+import {
+  invalidFinanceToolRequest,
+  resolveFinanceToolCaller,
+  runFinanceToolRead,
+} from "@/lib/tools/finance-tool-auth";
 import { getToolDebtSummary } from "@/queries/accounts";
 
 /** Current debt snapshot using the canonical Accounts-page semantics. */
 export async function GET(request: Request) {
+  const resolved = await resolveFinanceToolCaller(request);
+  if (!resolved.success) return resolved.response;
+
   const params = new URL(request.url).searchParams;
   for (const key of params.keys()) {
-    return NextResponse.json(
-      {
-        error: "invalid_request",
-        message: `Unsupported query parameter: ${key}`,
-      },
-      { status: 400 },
-    );
+    return invalidFinanceToolRequest(`Unsupported query parameter: ${key}`);
   }
 
-  const householdId = await getHouseholdId();
-  const summary = await withHousehold(householdId, (tx) =>
+  return runFinanceToolRead(resolved.caller, (householdId, tx) =>
     getToolDebtSummary(householdId, tx),
   );
-
-  return NextResponse.json(summary, {
-    headers: { "Cache-Control": "private, no-store" },
-  });
 }

@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { proxy, matcherPattern } from "@/proxy";
 
-function requestFor(pathname: string): NextRequest {
-  return new NextRequest(new URL(pathname, "http://localhost:4200"));
+function requestFor(pathname: string, headers?: HeadersInit): NextRequest {
+  return new NextRequest(new URL(pathname, "http://localhost:4200"), { headers });
 }
 
 /** Mirrors what Next.js does: only run the middleware on matching paths. */
@@ -45,5 +45,37 @@ describe("proxy matcher", () => {
     for (const p of ["/api/export/transactions.json", "/api/reports/data.xml", "/secret.txt"]) {
       expect(wouldRunMiddleware(p)).toBe(true);
     }
+  });
+});
+
+describe("finance tool bearer proxy bypass", () => {
+  const paths = [
+    "/api/tools/accounts",
+    "/api/tools/transactions",
+    "/api/tools/spending-summary",
+    "/api/tools/cash-flow-summary",
+    "/api/tools/debt-summary",
+    "/api/tools/spending-comparison",
+  ];
+
+  it.each(paths)("lets Authorization reach route authentication for %s", (path) => {
+    const response = proxy(
+      requestFor(path, { Authorization: "Bearer any-route-validates-this" }),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("does not make another API route bearer-accessible", () => {
+    const response = proxy(
+      requestFor("/api/search", { Authorization: "Bearer machine-token" }),
+    );
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toContain("/login");
+  });
+
+  it("retains the browser login redirect without Authorization", () => {
+    const response = proxy(requestFor("/api/tools/accounts"));
+    expect(response.status).toBe(307);
+    expect(response.headers.get("location")).toContain("/login");
   });
 });
