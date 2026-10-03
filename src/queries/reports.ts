@@ -24,6 +24,7 @@ import { fetchTransactionPage, type TransactionRow } from "@/queries/transaction
 import type { NetWorthPoint } from "@/queries/dashboard";
 import { getCurrentMonth, monthBounds, monthsSpanned } from "@/lib/date-utils";
 import type { SankeyNode, SankeyLink } from "@/components/organisms/sankey-chart";
+import { pctChange } from "@/lib/stat-delta";
 
 export interface ReportFilters {
   dateFrom: string;
@@ -133,6 +134,130 @@ export async function getToolSpendingSummary(
       (total, category) => total + category.amountCents,
       0,
     ),
+    categories,
+  };
+}
+
+export interface ToolSpendingComparisonCategory {
+  categoryId: string | null;
+  categoryName: string;
+  groupName: string | null;
+  amountCents: number | null;
+  comparisonAmountCents: number | null;
+  changeCents: number;
+  changePct: number | null;
+}
+
+export interface ToolSpendingComparison {
+  dateFrom: string;
+  dateTo: string;
+  comparisonDateFrom: string;
+  comparisonDateTo: string;
+  totalSpendingCents: number;
+  comparisonTotalSpendingCents: number;
+  changeCents: number;
+  changePct: number | null;
+  comparisonCoverage: {
+    lateAccountCount: number;
+    accountCount: number;
+    isPartial: boolean;
+  };
+  categories: ToolSpendingComparisonCategory[];
+}
+
+/**
+ * Compare two canonical Spending report summaries without reconstructing any
+ * accounting rules. Missing category rows remain null in the DTO and are
+ * treated as zero only for delta math.
+ */
+export async function getToolSpendingComparison(
+  householdId: string,
+  filters: ReportFilters,
+  comparisonFilters: ReportFilters,
+  db: LedgrDb = defaultDb,
+): Promise<ToolSpendingComparison> {
+  const [current, comparison, coverage] = await Promise.all([
+    getToolSpendingSummary(householdId, filters, db),
+    getToolSpendingSummary(householdId, comparisonFilters, db),
+    countAccountsStartingAfter(
+      householdId,
+      comparisonFilters.dateFrom,
+      filters.accountIds,
+      db,
+    ),
+  ]);
+
+  const categoryKey = (categoryId: string | null) =>
+    categoryId ?? "uncategorized";
+  const currentByCategory = new Map(
+    current.categories.map((category) => [
+      categoryKey(category.categoryId),
+      category,
+    ]),
+  );
+  const comparisonByCategory = new Map(
+    comparison.categories.map((category) => [
+      categoryKey(category.categoryId),
+      category,
+    ]),
+  );
+  const categoryKeys = new Set([
+    ...currentByCategory.keys(),
+    ...comparisonByCategory.keys(),
+  ]);
+
+  const categories = [...categoryKeys]
+    .map((key): ToolSpendingComparisonCategory => {
+      const currentCategory = currentByCategory.get(key);
+      const comparisonCategory = comparisonByCategory.get(key);
+      const metadata = currentCategory ?? comparisonCategory;
+      if (!metadata) {
+        throw new Error("Spending comparison category metadata is missing");
+      }
+
+      const amountCents = currentCategory?.amountCents ?? null;
+      const comparisonAmountCents =
+        comparisonCategory?.amountCents ?? null;
+      const currentForMath = amountCents ?? 0;
+      const comparisonForMath = comparisonAmountCents ?? 0;
+
+      return {
+        categoryId: metadata.categoryId,
+        categoryName: metadata.categoryName,
+        groupName: metadata.groupName,
+        amountCents,
+        comparisonAmountCents,
+        changeCents: currentForMath - comparisonForMath,
+        changePct: pctChange(currentForMath, comparisonForMath),
+      };
+    })
+    .sort(
+      (a, b) =>
+        Math.abs(b.changeCents) - Math.abs(a.changeCents) ||
+        (b.amountCents ?? 0) - (a.amountCents ?? 0) ||
+        (a.categoryId ?? "uncategorized").localeCompare(
+          b.categoryId ?? "uncategorized",
+        ),
+    );
+
+  return {
+    dateFrom: current.dateFrom,
+    dateTo: current.dateTo,
+    comparisonDateFrom: comparison.dateFrom,
+    comparisonDateTo: comparison.dateTo,
+    totalSpendingCents: current.totalSpendingCents,
+    comparisonTotalSpendingCents: comparison.totalSpendingCents,
+    changeCents:
+      current.totalSpendingCents - comparison.totalSpendingCents,
+    changePct: pctChange(
+      current.totalSpendingCents,
+      comparison.totalSpendingCents,
+    ),
+    comparisonCoverage: {
+      lateAccountCount: coverage.late,
+      accountCount: coverage.total,
+      isPartial: coverage.late > 0,
+    },
     categories,
   };
 }
