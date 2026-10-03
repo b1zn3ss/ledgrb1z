@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getHouseholdId: vi.fn(),
   getToolSpendingSummary: vi.fn(),
-  withHousehold: vi.fn(),
+  withReadOnlyHousehold: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/session", () => ({
@@ -11,7 +11,7 @@ vi.mock("@/lib/auth/session", () => ({
 }));
 
 vi.mock("@/lib/household-context", () => ({
-  withHousehold: mocks.withHousehold,
+  withReadOnlyHousehold: mocks.withReadOnlyHousehold,
 }));
 
 vi.mock("@/queries/reports", () => ({
@@ -28,7 +28,7 @@ describe("GET /api/tools/spending-summary", () => {
       totalSpendingCents: 0,
       categories: [],
     });
-    mocks.withHousehold.mockImplementation(async (householdId, work) =>
+    mocks.withReadOnlyHousehold.mockImplementation(async (householdId, work) =>
       work({ householdId }),
     );
   });
@@ -90,7 +90,7 @@ describe("GET /api/tools/spending-summary", () => {
       error: "invalid_request",
       message: expect.any(String),
     });
-    expect(mocks.getHouseholdId).not.toHaveBeenCalled();
+    expect(mocks.getHouseholdId).toHaveBeenCalledOnce();
     expect(mocks.getToolSpendingSummary).not.toHaveBeenCalled();
   });
 });

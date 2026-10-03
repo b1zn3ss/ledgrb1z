@@ -1,24 +1,25 @@
-import { NextResponse } from "next/server";
-import { getHouseholdId } from "@/lib/auth/session";
-import { withHousehold } from "@/lib/household-context";
+import {
+  invalidFinanceToolRequest,
+  resolveFinanceToolCaller,
+  runFinanceToolRead,
+} from "@/lib/tools/finance-tool-auth";
 import { parseToolSpendingComparisonParams } from "@/lib/tools/spending-comparison-params";
 import { getToolSpendingComparison } from "@/queries/reports";
 
 /** Read-only comparison of two canonical Spending report periods. */
 export async function GET(request: Request) {
+  const resolved = await resolveFinanceToolCaller(request);
+  if (!resolved.success) return resolved.response;
+
   const parsed = parseToolSpendingComparisonParams(
     new URL(request.url).searchParams,
   );
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "invalid_request", message: parsed.message },
-      { status: 400 },
-    );
+    return invalidFinanceToolRequest(parsed.message);
   }
 
-  const householdId = await getHouseholdId();
   const { filters, comparisonFilters } = parsed.data;
-  const comparison = await withHousehold(householdId, (tx) =>
+  return runFinanceToolRead(resolved.caller, (householdId, tx) =>
     getToolSpendingComparison(
       householdId,
       filters,
@@ -26,8 +27,4 @@ export async function GET(request: Request) {
       tx,
     ),
   );
-
-  return NextResponse.json(comparison, {
-    headers: { "Cache-Control": "private, no-store" },
-  });
 }

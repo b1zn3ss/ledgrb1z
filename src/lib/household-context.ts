@@ -32,3 +32,20 @@ export async function withHousehold<T>(
     return work(tx);
   });
 }
+
+/**
+ * Runs household-scoped report work in a transaction that PostgreSQL itself
+ * prevents from writing. Read-only mode must be established before any query
+ * in the transaction, including the household context assignment below.
+ */
+export async function withReadOnlyHousehold<T>(
+  householdId: string,
+  work: (tx: LedgrDb) => Promise<T>,
+  db: LedgrDb = defaultDb,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`set transaction read only`);
+    await tx.execute(sql`select set_config('app.household_id', ${householdId}, true)`);
+    return work(tx);
+  });
+}

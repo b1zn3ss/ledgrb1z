@@ -1,6 +1,8 @@
-import { NextResponse } from "next/server";
-import { getHouseholdId } from "@/lib/auth/session";
-import { withHousehold } from "@/lib/household-context";
+import {
+  invalidFinanceToolRequest,
+  resolveFinanceToolCaller,
+  runFinanceToolRead,
+} from "@/lib/tools/finance-tool-auth";
 import { parseToolTransactionParams } from "@/lib/tools/transaction-params";
 import { getToolTransactions } from "@/queries/transactions";
 
@@ -9,21 +11,16 @@ import { getToolTransactions } from "@/queries/transactions";
  * Amounts are signed integer cents using normalizedAmount's display convention.
  */
 export async function GET(request: Request) {
+  const resolved = await resolveFinanceToolCaller(request);
+  if (!resolved.success) return resolved.response;
+
   const parsed = parseToolTransactionParams(new URL(request.url).searchParams);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: "invalid_request", message: parsed.message },
-      { status: 400 },
-    );
+    return invalidFinanceToolRequest(parsed.message);
   }
 
-  const householdId = await getHouseholdId();
   const { filters, limit, cursor } = parsed.data;
-  const page = await withHousehold(householdId, (tx) =>
+  return runFinanceToolRead(resolved.caller, (householdId, tx) =>
     getToolTransactions(householdId, filters, limit, cursor, tx),
   );
-
-  return NextResponse.json(page, {
-    headers: { "Cache-Control": "private, no-store" },
-  });
 }
