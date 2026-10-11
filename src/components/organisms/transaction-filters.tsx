@@ -30,6 +30,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
@@ -102,6 +103,11 @@ export function TransactionFilters({ accounts, categories, resultCount }: Transa
 
   const [searchValue, setSearchValue] = useState(searchParams.get("q") ?? "");
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const standardExportParams = new URLSearchParams(searchParams);
+  standardExportParams.delete("exportMode");
+  const auditExportParams = new URLSearchParams(searchParams);
+  auditExportParams.set("exportMode", "audit");
+  const exportPath = "/api/export/transactions?";
 
   const [accountOpen, setAccountOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
@@ -346,15 +352,29 @@ export function TransactionFilters({ accounts, categories, resultCount }: Transa
           />
         </InputGroup>
 
-        <a
-          href={`/api/export/transactions?${searchParams.toString()}`}
-          download
-          className="ml-auto"
-        >
-          <Button variant="outline" size="sm" className="h-9 text-xs">
-            <Download className="mr-1 h-3.5 w-3.5" /> Export
-          </Button>
-        </a>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button variant="outline" size="sm" className="ml-auto h-9 text-xs" />
+            }
+          >
+            <Download className="mr-1 h-3.5 w-3.5" />
+            Export
+            <ChevronDown className="ml-1 h-3 w-3 opacity-60" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuItem
+              render={<a href={exportPath + standardExportParams.toString()} download />}
+            >
+              Standard export
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              render={<a href={exportPath + auditExportParams.toString()} download />}
+            >
+              Audit export
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/*

@@ -177,7 +177,7 @@ export function baseTransactionQuery(db: LedgrDb, householdId: string) {
   return { scoped, select, from, joins };
 }
 
-function buildTransactionConditions(filters: TransactionFilters): (SQL | undefined)[] {
+export function buildTransactionConditions(filters: TransactionFilters): (SQL | undefined)[] {
   // Hidden rows are excluded by default, same as deleted ones — not just
   // when some other filter happens to be set. `filters.hidden === true`
   // flips this into the one dedicated view that shows them.
