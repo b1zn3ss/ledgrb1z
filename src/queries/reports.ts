@@ -9,13 +9,12 @@ import {
   recurringTransactions,
 } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
-import { notDeleted, notHidden, sumAbs, sumCol, countRows } from "@/lib/query-helpers";
-import { getIncomeCategoryIds, includedInCashFlow, includedInSpending, notIncome } from "@/queries/shared-conditions";
+import { notDeleted, notHidden, sumAbs, countRows } from "@/lib/query-helpers";
+import { getIncomeCategoryIds, includedInSpending, notIncome } from "@/queries/shared-conditions";
 import { classifyAccountType } from "@/lib/account-utils";
 import { resolvedCategoryLabel, UNCATEGORIZED } from "@/lib/labels";
 import {
   aggregateSpending,
-  cashFlowExpenseBaseConditions,
   enrichSpendingMap,
   spendingBaseConditions,
   incomeBaseConditions,
@@ -25,6 +24,7 @@ import type { NetWorthPoint } from "@/queries/dashboard";
 import { getCurrentMonth, monthBounds, monthsSpanned } from "@/lib/date-utils";
 import type { SankeyNode, SankeyLink } from "@/components/organisms/sankey-chart";
 import { pctChange } from "@/lib/stat-delta";
+import { getCashFlowMovements, summarizeCashFlow } from "@/queries/cash-flow";
 
 export interface ReportFilters {
   dateFrom: string;
@@ -330,65 +330,28 @@ export async function getCashFlowSummary(
   filters: ReportFilters,
   db: LedgrDb = defaultDb,
 ): Promise<IncomeExpenseRow[]> {
-  const scoped = scopedQuery(householdId, db);
-  const conditions = [
-    notDeleted(transactions),
-    notHidden(transactions),
-    eq(transactions.pending, false),
-    await includedInCashFlow(householdId, db),
-    gte(transactions.date, filters.dateFrom),
-    lte(transactions.date, filters.dateTo),
-  ];
-  if (filters.accountIds?.length) {
-    conditions.push(inArray(transactions.accountId, filters.accountIds));
-  }
-  if (filters.categoryIds?.length) {
-    conditions.push(inArray(transactions.categoryId, filters.categoryIds));
-  }
-
-  const incomeCatIds = [...(await getIncomeCategoryIds(householdId, db))];
-  const inIncomeCat =
-    incomeCatIds.length > 0 ? inArray(transactions.categoryId, incomeCatIds) : sql`false`;
-  const isIncome = sql`(
-    COALESCE(${inIncomeCat}, false)
-    OR (${transactions.categoryId} IS NULL AND ${transactions.normalizedAmount} > 0)
-  )`;
-  const isOutflow = sql`(NOT (${isIncome}) AND ${transactions.normalizedAmount} < 0)`;
-  const monthExpr = sql<string>`substring(${transactions.date}, 1, 7)`;
-
-  const rows = await db
-    .select({
-      period: monthExpr,
-      income: sql<number>`COALESCE(SUM(CASE WHEN ${isIncome} THEN ${transactions.normalizedAmount} ELSE 0 END), 0)`.mapWith(Number),
-      expenses: sql<number>`COALESCE(SUM(CASE WHEN ${isOutflow} THEN ABS(${transactions.normalizedAmount}) ELSE 0 END), 0)`.mapWith(Number),
-    })
-    .from(transactions)
-    .where(scoped.where(transactions, ...conditions))
-    .groupBy(monthExpr)
-    .orderBy(monthExpr);
-
-  return rows.map(({ period, income, expenses }) => ({
-    period,
-    income,
-    expenses,
-    net: income - expenses,
-  }));
+  return summarizeCashFlow(await getCashFlowMovements(householdId, filters, db))
+    .map(({ period, cashIn, cashOut, net }) => ({
+      period,
+      income: cashIn,
+      expenses: cashOut,
+      net,
+    }));
 }
 
 export interface ToolCashFlowPeriod {
   period: string;
-  incomeCents: number;
-  outflowCents: number;
+  cashInCents: number;
+  cashOutCents: number;
   netCashFlowCents: number;
 }
 
 export interface ToolCashFlowSummary {
   dateFrom: string;
   dateTo: string;
-  incomeCents: number;
-  outflowCents: number;
+  cashInCents: number;
+  cashOutCents: number;
   netCashFlowCents: number;
-  savingsRatePct: number | null;
   periods: ToolCashFlowPeriod[];
 }
 
@@ -405,13 +368,13 @@ export async function getToolCashFlowSummary(
   const periods = (await getCashFlowSummary(householdId, filters, db))
     .map((row) => ({
       period: row.period,
-      incomeCents: row.income,
-      outflowCents: row.expenses,
+      cashInCents: row.income,
+      cashOutCents: row.expenses,
       netCashFlowCents: row.net,
     }))
     .sort((a, b) => a.period.localeCompare(b.period));
-  const incomeCents = periods.reduce((total, period) => total + period.incomeCents, 0);
-  const outflowCents = periods.reduce((total, period) => total + period.outflowCents, 0);
+  const cashInCents = periods.reduce((total, period) => total + period.cashInCents, 0);
+  const cashOutCents = periods.reduce((total, period) => total + period.cashOutCents, 0);
   const netCashFlowCents = periods.reduce(
     (total, period) => total + period.netCashFlowCents,
     0,
@@ -420,11 +383,9 @@ export async function getToolCashFlowSummary(
   return {
     dateFrom: filters.dateFrom,
     dateTo: filters.dateTo,
-    incomeCents,
-    outflowCents,
+    cashInCents,
+    cashOutCents,
     netCashFlowCents,
-    savingsRatePct:
-      incomeCents === 0 ? null : (netCashFlowCents / incomeCents) * 100,
     periods,
   };
 }
@@ -853,109 +814,25 @@ export async function getCashFlowSankey(
   filters: ReportFilters,
   db: LedgrDb = defaultDb,
 ): Promise<{ nodes: SankeyNode[]; links: SankeyLink[] }> {
-  const scoped = scopedQuery(householdId, db);
-  const incomeCatIds = await getIncomeCategoryIds(householdId, db);
-
-  const conditions = [
-    notDeleted(transactions),
-    notHidden(transactions),
-    eq(transactions.pending, false),
-    await includedInCashFlow(householdId, db),
-    gte(transactions.date, filters.dateFrom),
-    lte(transactions.date, filters.dateTo),
-  ];
-
-  if (filters.accountIds?.length) {
-    conditions.push(inArray(transactions.accountId, filters.accountIds));
-  }
-  if (filters.categoryIds?.length) {
-    conditions.push(inArray(transactions.categoryId, filters.categoryIds));
-  }
-
+  const movements = await getCashFlowMovements(householdId, filters, db);
   const incomeMap = new Map<string, { name: string; total: number }>();
   const expenseMap = new Map<string, { name: string; total: number }>();
-
-  // Income side: signed sum, matching the Total Income tile's rule
-  // (getIncomeVsExpense) — a debit mis-filed under an income category must
-  // subtract, not add via ABS(), or it inflates the very node it should
-  // shrink. A category whose net comes out <= 0 (more mis-filed debits than
-  // real credits) is dropped rather than shown as a negative-income source.
-  if (incomeCatIds.size > 0) {
-    const incomeRows = await db
-      .select({
-        categoryId: transactions.categoryId,
-        categoryName: categories.name,
-        total: sumCol(transactions.normalizedAmount),
-      })
-      .from(transactions)
-      .leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .where(scoped.where(transactions, ...conditions, inArray(transactions.categoryId, [...incomeCatIds])))
-      .groupBy(transactions.categoryId, categories.name);
-
-    for (const row of incomeRows) {
-      if (row.total <= 0) continue;
-      incomeMap.set(row.categoryId!, { name: resolvedCategoryLabel(row.categoryName), total: row.total });
-    }
-  }
-
-  // Uncategorized credits count as income on the tile and in the Income
-  // Sources table, so they get a source node here too — otherwise this
-  // diagram's income side undershoots both by exactly that amount.
-  const [uncategorizedCredit] = await db
-    .select({ total: sumCol(transactions.normalizedAmount) })
-    .from(transactions)
-    .where(
-      scoped.where(
-        transactions,
-        ...conditions,
-        isNull(transactions.categoryId),
-        sql`${transactions.normalizedAmount} > 0`,
-      ),
-    );
-  if ((uncategorizedCredit?.total ?? 0) > 0) {
-    incomeMap.set("uncategorized", { name: UNCATEGORIZED, total: uncategorizedCredit.total });
-  }
-
-  // Expense side: non-income rows with a NEGATIVE normalizedAmount, summed as
-  // ABS — the same rule as the Spending tab. Uncategorized rows are included:
-  // excluding them drew a money-flow diagram missing the largest outflow in the
-  // period, which is precisely the flow a reader is looking for.
-  const expenseConditions = [
-    ...conditions,
-    sql`${transactions.normalizedAmount} < 0`,
-  ];
-  if (incomeCatIds.size > 0) {
-    // `category_id NOT IN (...)` is NULL — not TRUE — for an uncategorized row,
-    // so a bare notInArray silently drops every one of them.
-    expenseConditions.push(
-      sql`(${transactions.categoryId} IS NULL OR ${notInArray(transactions.categoryId, [...incomeCatIds])})`,
-    );
-  }
-  const expenseRows = await db
-    .select({
-      categoryId: transactions.categoryId,
-      categoryName: categories.name,
-      total: sumAbs(transactions.normalizedAmount),
-    })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(scoped.where(transactions, ...expenseConditions))
-    .groupBy(transactions.categoryId, categories.name);
-
-  for (const row of expenseRows) {
-    expenseMap.set(row.categoryId ?? "uncategorized", {
-      name: row.categoryId === null ? UNCATEGORIZED : resolvedCategoryLabel(row.categoryName),
-      total: row.total,
-    });
+  for (const movement of movements) {
+    if (movement.contributionCents === 0) continue;
+    const key = movement.categoryId ?? "uncategorized";
+    const name = movement.categoryId === null
+      ? UNCATEGORIZED
+      : resolvedCategoryLabel(movement.categoryName);
+    const target = movement.contributionCents > 0 ? incomeMap : expenseMap;
+    const amount = Math.abs(movement.contributionCents);
+    const existing = target.get(key);
+    target.set(key, { name, total: (existing?.total ?? 0) + amount });
   }
 
   const totalIncome = [...incomeMap.values()].reduce((s, v) => s + v.total, 0);
   const totalExpenses = [...expenseMap.values()].reduce((s, v) => s + v.total, 0);
-  // Positive when spending outran income for the period. Splitting every
-  // expense across income sources in proportion to income (as before) then
-  // inflated each income node to cover spending it never funded — Salary
-  // showed $15,728 against a real $13,407. A "Shortfall" source makes up the
-  // gap instead, so each income node's own outflow equals its real total.
+  // Pseudo-nodes balance the diagram without describing liquid cash movement
+  // as earned income, consumption, or savings.
   const shortfall = totalExpenses - totalIncome;
   const surplus = totalIncome - totalExpenses;
 
@@ -964,31 +841,31 @@ export async function getCashFlowSankey(
     nodes.push({ id: `income-${id}`, name: data.name, type: "income" });
   }
   if (shortfall > 0) {
-    nodes.push({ id: "shortfall", name: "Shortfall", type: "shortfall" });
+    nodes.push({ id: "cash-decrease", name: "Net Cash Decrease", type: "shortfall" });
   }
   for (const [id, data] of expenseMap) {
     nodes.push({ id: `expense-${id}`, name: data.name, type: "expense" });
   }
   if (surplus > 0) {
-    nodes.push({ id: "savings", name: "Savings", type: "savings" });
+    nodes.push({ id: "cash-increase", name: "Net Cash Increase", type: "savings" });
   }
 
   // Sources (money in) and targets (money out) participate in one proportional
   // split whose row and column totals both sum to max(totalIncome,
-  // totalExpenses) — the Shortfall/Savings pseudo-entry makes up whichever
+  // totalExpenses) — the balancing pseudo-entry makes up whichever
   // side is short, so the allocation below preserves every real node's own
   // total exactly, not just the grand total.
   const sourceIds = [...incomeMap.keys()].map((id) => `income-${id}`);
   const sourceTotals = [...incomeMap.values()].map((v) => v.total);
   if (shortfall > 0) {
-    sourceIds.push("shortfall");
+    sourceIds.push("cash-decrease");
     sourceTotals.push(shortfall);
   }
 
   const targetIds = [...expenseMap.keys()].map((id) => `expense-${id}`);
   const targetTotals = [...expenseMap.values()].map((v) => v.total);
   if (surplus > 0) {
-    targetIds.push("savings");
+    targetIds.push("cash-increase");
     targetTotals.push(surplus);
   }
 
@@ -1180,12 +1057,38 @@ export async function getDrillDownTransactions(
 ): Promise<DrillDownResult> {
   const scoped = scopedQuery(householdId, db);
 
+  if (filters.reportContext === "cash-flow") {
+    const movements = (await getCashFlowMovements(householdId, filters, db))
+      .filter((movement) =>
+        filters.categoryId === undefined || movement.categoryId === filters.categoryId,
+      )
+      .filter((movement) =>
+        filters.type === "income"
+          ? movement.contributionCents > 0
+          : movement.contributionCents < 0,
+      );
+    if (movements.length === 0) {
+      return { rows: [], hasMore: false, total: 0, matchCount: 0 };
+    }
+    const page = await fetchTransactionPage(
+      householdId,
+      [inArray(transactions.id, movements.map((movement) => movement.transactionId))],
+      limit,
+      null,
+      db,
+    );
+    return {
+      rows: page.rows,
+      hasMore: page.nextCursor !== null,
+      total: movements.reduce((sum, movement) => sum + Math.abs(movement.contributionCents), 0),
+      matchCount: movements.length,
+    };
+  }
+
   const conditions =
     filters.type === "income"
       ? await incomeBaseConditions(householdId, filters, db)
-      : filters.reportContext === "cash-flow"
-        ? await cashFlowExpenseBaseConditions(householdId, filters, db)
-        : await spendingBaseConditions(householdId, filters, db);
+      : await spendingBaseConditions(householdId, filters, db);
 
   if (filters.categoryId === null) {
     conditions.push(isNull(transactions.categoryId));

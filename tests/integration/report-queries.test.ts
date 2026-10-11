@@ -300,12 +300,12 @@ describe("getCashFlowSankey", () => {
     expect(nodes.some((n) => n.id === `income-${incomeCatId}` && n.type === "income" && n.name === "Salary")).toBe(true);
     expect(nodes.some((n) => n.id === `expense-${foodCatId}` && n.type === "expense")).toBe(true);
     expect(nodes.some((n) => n.id === `expense-${rentCatId}` && n.type === "expense")).toBe(true);
-    expect(nodes.some((n) => n.id === "savings" && n.type === "savings")).toBe(true);
+    expect(nodes.some((n) => n.id === "cash-increase" && n.type === "savings")).toBe(true);
 
     const share = 1; // single income category -> 100% share
     const foodLink = links.find((l) => l.target === `expense-${foodCatId}`);
     const rentLink = links.find((l) => l.target === `expense-${rentCatId}`);
-    const savingsLink = links.find((l) => l.target === "savings");
+    const savingsLink = links.find((l) => l.target === "cash-increase");
     expect(foodLink?.value).toBe(Math.round(8000 * share));
     expect(rentLink?.value).toBe(Math.round(100000 * share));
     // surplus = 500000 - (8000 + 100000) = 392000
@@ -320,33 +320,34 @@ describe("getCashFlowSankey", () => {
     const { getCashFlowSankey } = await import("../../src/queries/reports");
     const { links } = await getCashFlowSankey(householdId, { dateFrom: "2026-03-01", dateTo: "2026-03-31" }, db);
 
-    // Food expense stays 8000 (the +2000 refund is ignored).
-    const foodLink = links.find((l) => l.target === `expense-${foodCatId}`);
-    expect(foodLink?.value).toBe(8000);
+    // Food cash out stays 8000. The refund is a separate cash-in source, so
+    // allocation can produce multiple links into the same target.
+    const foodOut = links
+      .filter((link) => link.target === `expense-${foodCatId}`)
+      .reduce((sum, link) => sum + link.value, 0);
+    expect(foodOut).toBe(8000);
+    expect(links.some((link) => link.source === `income-${foodCatId}`)).toBe(true);
   });
 
-  test("income category sums by signed amount, matching the Total Income tile", async () => {
-    // A negative-signed income txn (e.g. a reversal, or a debit mis-filed
-    // under an income category) subtracts, matching getIncomeVsExpense's
-    // rule — ABS() previously added its magnitude, inflating the node it
-    // should have shrunk.
+  test("an income-category reversal appears as cash out without reducing cash in", async () => {
     await insertTransaction(db, householdId, accountId, { date: "2026-03-09", normalizedAmount: -100000, amount: 100000, categoryId: incomeCatId, name: "Income reversal" });
 
     const { getCashFlowSankey } = await import("../../src/queries/reports");
     const { links } = await getCashFlowSankey(householdId, { dateFrom: "2026-03-01", dateTo: "2026-03-31" }, db);
 
-    // Income pool = 500000 + (-100000) = 400000; expenses 108000; surplus 292000.
-    const savingsLink = links.find((l) => l.target === "savings");
+    // Cash in remains 500000; cash out is 208000; net cash increase is 292000.
+    const savingsLink = links.find((l) => l.target === "cash-increase");
     expect(savingsLink?.value).toBe(292000);
   });
 
-  test("an income category whose signed net is <= 0 is dropped as a source", async () => {
+  test("opposite-signed movements in one category remain on opposite cash-flow sides", async () => {
     await insertTransaction(db, householdId, accountId, { date: "2026-03-09", normalizedAmount: -600000, amount: 600000, categoryId: incomeCatId, name: "Big reversal" });
 
     const { getCashFlowSankey } = await import("../../src/queries/reports");
     const { nodes } = await getCashFlowSankey(householdId, { dateFrom: "2026-03-01", dateTo: "2026-03-31" }, db);
 
-    expect(nodes.find((n) => n.id === `income-${incomeCatId}`)).toBeUndefined();
+    expect(nodes.find((n) => n.id === `income-${incomeCatId}`)).toBeDefined();
+    expect(nodes.find((n) => n.id === `expense-${incomeCatId}`)).toBeDefined();
   });
 
   test("adds a Shortfall source when expenses exceed income, so each income node keeps its own real total", async () => {
@@ -362,8 +363,12 @@ describe("getCashFlowSankey", () => {
     const { getCashFlowSankey } = await import("../../src/queries/reports");
     const { nodes, links } = await getCashFlowSankey(householdId, range, db);
 
-    expect(nodes.find((n) => n.id === "shortfall")).toEqual({ id: "shortfall", name: "Shortfall", type: "shortfall" });
-    expect(nodes.find((n) => n.id === "savings")).toBeUndefined();
+    expect(nodes.find((n) => n.id === "cash-decrease")).toEqual({
+      id: "cash-decrease",
+      name: "Net Cash Decrease",
+      type: "shortfall",
+    });
+    expect(nodes.find((n) => n.id === "cash-increase")).toBeUndefined();
 
     const totalFrom = (sourceId: string) =>
       links.filter((l) => l.source === sourceId).reduce((s, l) => s + l.value, 0);
@@ -372,24 +377,25 @@ describe("getCashFlowSankey", () => {
 
     // The income node's own outflow equals its real income, not more.
     expect(totalFrom(`income-${incomeCatId}`)).toBe(100000);
-    expect(totalFrom("shortfall")).toBe(50000);
+    expect(totalFrom("cash-decrease")).toBe(50000);
     expect(totalTo(`expense-${foodCatId}`)).toBe(100000);
     expect(totalTo(`expense-${rentCatId}`)).toBe(50000);
   });
 
-  test("gives uncategorized credits an income source, so the income side matches the Total Income tile", async () => {
+  test("gives uncategorized inflows a source matching the Cash In summary", async () => {
     const range = { dateFrom: "2026-03-01", dateTo: "2026-03-31" };
     await insertTransaction(db, householdId, accountId, { date: "2026-03-10", normalizedAmount: 20000, amount: -20000, categoryId: null, name: "Venmo" });
 
-    const { getCashFlowSankey, getIncomeVsExpense } = await import("../../src/queries/reports");
+    const { getCashFlowSankey, getCashFlowSummary } = await import("../../src/queries/reports");
     const { nodes, links } = await getCashFlowSankey(householdId, range, db);
-    const tileIncome = (await getIncomeVsExpense(householdId, range, db)).reduce((s, r) => s + r.income, 0);
+    const cashIn = (await getCashFlowSummary(householdId, range, db))
+      .reduce((sum, row) => sum + row.income, 0);
 
     expect(nodes.find((n) => n.id === "income-uncategorized")?.type).toBe("income");
     const incomeOut = links
       .filter((l) => l.source.startsWith("income-"))
       .reduce((s, l) => s + l.value, 0);
-    expect(incomeOut).toBe(tileIncome);
+    expect(incomeOut).toBe(cashIn);
   });
 
   test("applies the categoryIds filter like other report queries", async () => {

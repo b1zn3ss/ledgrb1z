@@ -130,9 +130,9 @@ describe("uncategorized spending is never silently dropped", () => {
     const { nodes } = await getCashFlowSankey(householdId, RANGE, db);
 
     // A money-flow diagram that omits the largest outflow is not a money-flow
-    // diagram. Rent, which only received a credit, is correctly absent.
+    // diagram. A credit in Rent is cash in even though it is not earned income.
     expect(nodes.find((n) => n.id === "expense-uncategorized")?.name).toBe("Uncategorized");
-    expect(nodes.find((n) => n.name === "Rent")).toBeUndefined();
+    expect(nodes.find((n) => n.id.startsWith("income-") && n.name === "Rent")).toBeDefined();
   });
 
   test("the expense rows sum to the Total Expenses tile", async () => {

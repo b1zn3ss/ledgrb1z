@@ -216,6 +216,11 @@ describe("transaction CSV export", () => {
     const csv = await buildCsvString(householdId, { hidden: true }, db, "audit");
 
     expect(records(csv).map((row) => row.Description)).toEqual(["Hidden Charge"]);
+    expect(records(csv)[0]).toMatchObject({
+      "In Selected Liquid Scope": "true",
+      "Cash Flow Contribution Cents": "0",
+      "Cash Flow Exclusion Reason": "Hidden",
+    });
   });
 
   test("audit export exposes reconciliation metadata and canonical report contributions", async () => {
@@ -229,6 +234,8 @@ describe("transaction CSV export", () => {
 
     expect(split).toMatchObject({
       "Account ID": checkingId,
+      "Account Type": "checking",
+      "In Selected Liquid Scope": "true",
       "Category ID": groceriesId,
       "Raw Amount Cents": "3000",
       "Normalized Amount Cents": "-3000",
@@ -240,6 +247,8 @@ describe("transaction CSV export", () => {
       "Included In Cash Flow": "true",
       "Cash Flow Expense Contribution Cents": "3000",
       "Cash Flow Net Contribution Cents": "-3000",
+      "Cash Flow Contribution Cents": "-3000",
+      "Cash Flow Exclusion Reason": "",
     });
     expect(JSON.parse(split?.Splits ?? "[]")).toHaveLength(2);
     expect(transfer).toMatchObject({
@@ -247,11 +256,17 @@ describe("transaction CSV export", () => {
       "Included In Spending": "false",
       "Spending Contribution Cents": "0",
       "Included In Cash Flow": "false",
+      "Account Type": "credit",
+      "In Selected Liquid Scope": "false",
+      "Cash Flow Contribution Cents": "0",
+      "Cash Flow Exclusion Reason": "Non-liquid account",
     });
     expect(pending).toMatchObject({
       Pending: "true",
       "Included In Spending": "false",
       "Included In Cash Flow": "false",
+      "Cash Flow Contribution Cents": "0",
+      "Cash Flow Exclusion Reason": "Pending",
     });
   });
 

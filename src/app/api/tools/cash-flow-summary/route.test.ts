@@ -11,7 +11,7 @@ describe("GET /api/tools/cash-flow-summary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getHouseholdId.mockResolvedValue("household-active");
-    mocks.getToolCashFlowSummary.mockResolvedValue({ dateFrom: "2026-09-01", dateTo: "2026-09-30", incomeCents: 0, outflowCents: 0, netCashFlowCents: 0, savingsRatePct: null, periods: [] });
+    mocks.getToolCashFlowSummary.mockResolvedValue({ dateFrom: "2026-09-01", dateTo: "2026-09-30", cashInCents: 0, cashOutCents: 0, netCashFlowCents: 0, periods: [] });
     mocks.withReadOnlyHousehold.mockImplementation(async (householdId, work) => work({ householdId }));
   });
   afterEach(() => vi.useRealTimers());

@@ -8,12 +8,13 @@ import {
 } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted, notHidden } from "@/lib/query-helpers";
-import { getIncomeCategoryIds, includedInSpending } from "@/queries/shared-conditions";
+import { includedInSpending } from "@/queries/shared-conditions";
 import { aggregateSpending, enrichSpendingMap } from "@/lib/spending-helpers";
 import type { ReportFilters } from "@/queries/reports";
 import { classifyAccountType } from "@/lib/account-utils";
 import { todayDateString, rangeToDateBounds, monthBounds, getCurrentMonth } from "@/lib/date-utils";
 import { baseTransactionQuery, type TransactionRow } from "./transactions";
+import { getCashFlowMovements, summarizeCashFlow } from "./cash-flow";
 
 // ─── getDashboardSummary ────────────────────────────────────────────────────
 
@@ -339,50 +340,18 @@ export async function getCashFlow(
   months = 6,
   db: LedgrDb = defaultDb
 ): Promise<CashFlowRow[]> {
-  const scoped = scopedQuery(householdId, db);
-
   const today = todayDateString();
   const d = new Date(today + "T00:00:00");
   d.setMonth(d.getMonth() - (months - 1));
   d.setDate(1);
   const dateFrom = d.toISOString().slice(0, 10);
-
-  const incomeCatIds = [...(await getIncomeCategoryIds(householdId, db))];
-
-  // COALESCE(...,false): a null or non-income category is treated as non-income,
-  // matching the prior `txn.categoryId && incomeCatIds.has(...)` check. When
-  // there are no income categories, the predicate is a constant false.
-  const isIncome =
-    incomeCatIds.length > 0
-      ? sql`COALESCE(${inArray(transactions.categoryId, incomeCatIds)}, false)`
-      : sql`false`;
-  const monthExpr = sql<string>`substring(${transactions.date}, 1, 7)`;
-
-  const rows = await db
-    .select({
-      month: monthExpr,
-      income: sql<number>`COALESCE(SUM(CASE WHEN ${isIncome} THEN ABS(${transactions.normalizedAmount}) ELSE 0 END), 0)`.mapWith(Number),
-      expenses: sql<number>`COALESCE(SUM(CASE WHEN NOT (${isIncome}) AND ${transactions.normalizedAmount} < 0 THEN ABS(${transactions.normalizedAmount}) ELSE 0 END), 0)`.mapWith(Number),
-    })
-    .from(transactions)
-    .where(
-      scoped.where(
-        transactions,
-        notDeleted(transactions),
-        notHidden(transactions),
-        gte(transactions.date, dateFrom),
-        eq(transactions.pending, false),
-        await includedInSpending(householdId, db),
-      )
-    )
-    .groupBy(monthExpr)
-    .orderBy(monthExpr);
-
-  return rows.map(({ month, income, expenses }) => ({
-    month,
-    income,
-    expenses,
-    net: income - expenses,
+  return summarizeCashFlow(
+    await getCashFlowMovements(householdId, { dateFrom, dateTo: today }, db),
+  ).map(({ period, cashIn, cashOut, net }) => ({
+    month: period,
+    income: cashIn,
+    expenses: cashOut,
+    net,
   }));
 }
 

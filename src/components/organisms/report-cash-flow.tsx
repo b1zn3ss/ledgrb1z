@@ -38,10 +38,9 @@ export function ReportCashFlow({
 }: ReportCashFlowProps) {
   const [drillDown, setDrillDown] = useState<DrillDownFilter | null>(null);
 
-  const rangeIncome = barData.reduce((s, r) => s + r.income, 0);
-  const rangeExpenses = barData.reduce((s, r) => s + r.expenses, 0);
-  const rangeNet = rangeIncome - rangeExpenses;
-  const savingsRate = rangeIncome === 0 ? null : (rangeNet / rangeIncome) * 100;
+  const rangeCashIn = barData.reduce((s, r) => s + r.income, 0);
+  const rangeCashOut = barData.reduce((s, r) => s + r.expenses, 0);
+  const rangeNet = rangeCashIn - rangeCashOut;
   const rangeLabel = `${formatDateShort(dateFrom)} – ${formatDateShort(dateTo)}`;
 
   // "September so far": the calendar month's own start through today (or
@@ -88,18 +87,12 @@ export function ReportCashFlow({
     <div className="space-y-4">
       <ReportStatStrip
         items={[
-          { label: `Income · ${rangeLabel}`, value: centsToDisplay(rangeIncome), tone: "positive" },
-          { label: "Spending", value: centsToDisplay(rangeExpenses) },
+          { label: `Cash In · ${rangeLabel}`, value: centsToDisplay(rangeCashIn), tone: "positive" },
+          { label: "Cash Out", value: centsToDisplay(rangeCashOut) },
           {
-            label: "Net",
+            label: "Net Cash Flow",
             value: centsToSignedDisplay(rangeNet),
             tone: rangeNet > 0 ? "positive" : rangeNet < 0 ? "negative" : "default",
-          },
-          {
-            label: "Savings rate",
-            value:
-              savingsRate === null ? "—" : `${savingsRate >= 0 ? "+" : ""}${Math.round(savingsRate)}%`,
-            tone: savingsRate === null ? "default" : savingsRate >= 0 ? "positive" : "negative",
           },
         ]}
       />
