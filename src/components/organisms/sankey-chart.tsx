@@ -9,10 +9,9 @@ import { activateOnKey } from "@/lib/a11y";
 export interface SankeyNode {
   id: string;
   name: string;
-  // "shortfall" (a source that makes up income the period didn't actually
-  // have) and "savings" (a target for money left over) are synthetic nodes —
-  // queries/reports.ts adds them so every source's outflow and every target's
-  // inflow balance to the same grand total.
+  // "shortfall" and "savings" are retained as internal visual node kinds.
+  // Their displayed labels describe net cash decrease/increase; the query adds
+  // them so every source and target balances to the same grand total.
   type: "income" | "expense" | "savings" | "shortfall";
 }
 
@@ -390,7 +389,7 @@ export function SankeyChart({ nodes, links, categoryColors, onNodeClick }: Sanke
           textAnchor="middle"
           className="text-[11px] fill-muted-foreground"
         >
-          {shortfallPresent ? "Spent" : "Income"} {wholeDollars(hubTotal)}
+          {shortfallPresent ? "Cash Out" : "Cash In"} {wholeDollars(hubTotal)}
         </text>
 
         {targets.map((t) => (

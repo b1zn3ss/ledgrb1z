@@ -69,7 +69,7 @@ export function ReportIncomeExpense({
       />
       <h3 className="text-lg font-medium">Income vs Expense</h3>
       <div className="h-[300px]">
-        <CashFlowBarChart data={chartData} showTrendline />
+        <CashFlowBarChart data={chartData} showTrendline terminology="income-expense" />
       </div>
       {categoryData && (
         <IncomeExpenseCategoryTable

@@ -73,10 +73,9 @@ describe("machine authentication on the trusted finance routes", () => {
     mocks.getToolCashFlowSummary.mockResolvedValue({
       dateFrom: "2026-07-01",
       dateTo: "2026-09-30",
-      incomeCents: 0,
-      outflowCents: 0,
+      cashInCents: 0,
+      cashOutCents: 0,
       netCashFlowCents: 0,
-      savingsRatePct: null,
       periods: [],
     });
     mocks.getToolSpendingComparison.mockResolvedValue({

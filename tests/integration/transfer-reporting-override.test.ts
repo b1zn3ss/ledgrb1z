@@ -147,7 +147,7 @@ describe("category transfer reporting override", () => {
     expect(rows.reduce((total, row) => total + row.total, 0)).toBe(5000);
   });
 
-  test("uses the independent override for Cash Flow summary and Sankey", async () => {
+  test("ignores category overrides for liquid Cash Flow summary and Sankey", async () => {
     const { getCashFlowSankey, getCashFlowSummary, getIncomeVsExpense } = await import(
       "../../src/queries/reports"
     );
@@ -156,7 +156,7 @@ describe("category transfer reporting override", () => {
     expect(month).toMatchObject({ income: 10000, expenses: 5000, net: 5000 });
 
     const [cashFlow] = await getCashFlowSummary(householdId, RANGE, db);
-    expect(cashFlow).toMatchObject({ income: 10000, expenses: 4000, net: 6000 });
+    expect(cashFlow).toMatchObject({ income: 27000, expenses: 23000, net: 4000 });
 
     const { links } = await getCashFlowSankey(householdId, RANGE, db);
     expect(
@@ -168,12 +168,12 @@ describe("category transfer reporting override", () => {
       links
         .filter((link) => link.target === `expense-${debtCategoryId}`)
         .reduce((total, link) => total + link.value, 0),
-    ).toBe(0);
+    ).toBe(10000);
     expect(
       links
-        .filter((link) => link.target === "savings")
+        .filter((link) => link.target === "cash-increase")
         .reduce((total, link) => total + link.value, 0),
-    ).toBe(6000);
+    ).toBe(4000);
   });
 
   test("keeps Safe to Spend on ordinary spending semantics", async () => {
@@ -194,7 +194,7 @@ describe("category transfer reporting override", () => {
 
     expect(rows.reduce((total, row) => total + row.total, 0)).toBe(5000);
   });
-  test("uses Cash Flow inclusion for outflow drill-downs only", async () => {
+  test("uses liquid Cash Flow inclusion for outflow drill-downs only", async () => {
     const { getDrillDownTransactions } = await import("../../src/queries/reports");
 
     const cashFlow = await getDrillDownTransactions(

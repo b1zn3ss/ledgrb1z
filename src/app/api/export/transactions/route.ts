@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { and, desc, eq } from "drizzle-orm";
 import { db as defaultDb, type LedgrDb } from "@/db";
-import { categories, transactionSplits, transactions } from "@/db/schema";
+import { accounts, categories, transactionSplits, transactions } from "@/db/schema";
 import { getHouseholdId } from "@/lib/auth/session";
 import { todayDateString } from "@/lib/date-utils";
 import { withReadOnlyHousehold } from "@/lib/household-context";
@@ -11,6 +11,7 @@ import {
   buildTransactionConditions,
   type TransactionFilters,
 } from "@/queries/transactions";
+import { getCashFlowDecisions, type CashFlowDecision } from "@/queries/cash-flow";
 
 export type ExportMode = "standard" | "audit";
 
@@ -32,6 +33,9 @@ const AUDIT_HEADER = [
   "Date",
   "Account ID",
   "Account",
+  "Account Type",
+  "Account Subtype",
+  "In Selected Liquid Scope",
   "Merchant ID",
   "Merchant",
   "Description",
@@ -73,6 +77,9 @@ const AUDIT_HEADER = [
   "Cash Flow Income Contribution Cents",
   "Cash Flow Expense Contribution Cents",
   "Cash Flow Net Contribution Cents",
+  "Cash Flow Contribution Cents",
+  "Cash Flow Exclusion Reason",
+  "Paired Account ID",
 ];
 
 interface AuditSplit {
@@ -107,6 +114,8 @@ export async function buildCsvString(
         categoryIsIncome: categories.isIncome,
         includeTransferInSpending: categories.includeTransferInSpending,
         includeTransferInCashFlow: categories.includeTransferInCashFlow,
+        accountType: accounts.type,
+        accountSubtype: accounts.subtype,
       })
       .from(base.from),
   )
@@ -165,7 +174,29 @@ export async function buildCsvString(
     }
   }
 
+  const cashFlowDecisions = await getCashFlowDecisions(
+    householdId,
+    {
+      dateFrom: filters.dateFrom ?? "0000-01-01",
+      dateTo: filters.dateTo ?? "9999-12-31",
+      accountIds: filters.accountId ? [filters.accountId] : undefined,
+      categoryIds:
+        filters.categoryId === undefined || filters.categoryId === null
+          ? undefined
+          : [filters.categoryId],
+    },
+    db,
+    {
+      includeExcluded: true,
+      transactionIds: rows.map((row: (typeof rows)[number]) => row.id),
+    },
+  );
+  const cashFlowByTransactionId = new Map(
+    cashFlowDecisions.map((decision: CashFlowDecision) => [decision.transactionId, decision]),
+  );
+
   const dataRows = rows.map((row: (typeof rows)[0]) => {
+    const cashFlowDecision = cashFlowByTransactionId.get(row.id);
     const splits = splitsByTransaction.get(row.id) ?? [];
     const splitAmountCents = splits.reduce((total, split) => total + split.amountCents, 0);
     const ordinaryReportTransaction = !row.isTransfer && row.transferPairId === null;
@@ -173,30 +204,21 @@ export async function buildCsvString(
       Boolean(row.isTransfer) &&
       row.normalizedAmount < 0 &&
       Boolean(row.includeTransferInSpending);
-    const includedByCashFlowTransferOverride =
-      Boolean(row.isTransfer) &&
-      row.normalizedAmount < 0 &&
-      Boolean(row.includeTransferInCashFlow);
     const includedInSpending =
       !row.pending &&
       row.normalizedAmount < 0 &&
       !row.categoryIsIncome &&
       (ordinaryReportTransaction || includedBySpendingTransferOverride);
-    const includedInCashFlow =
-      !row.pending &&
-      (ordinaryReportTransaction || includedByCashFlowTransferOverride);
-    const isCashFlowIncome =
-      Boolean(row.categoryIsIncome) ||
-      (row.categoryId === null && row.normalizedAmount > 0);
+    const includedInCashFlow = cashFlowDecision?.included ?? false;
     const spendingContributionCents = includedInSpending
       ? splits.length > 0
         ? splitAmountCents
         : Math.abs(row.normalizedAmount)
       : 0;
     const cashFlowIncomeContributionCents =
-      includedInCashFlow && isCashFlowIncome ? row.normalizedAmount : 0;
+      includedInCashFlow && row.normalizedAmount > 0 ? row.normalizedAmount : 0;
     const cashFlowExpenseContributionCents =
-      includedInCashFlow && !isCashFlowIncome && row.normalizedAmount < 0
+      includedInCashFlow && row.normalizedAmount < 0
         ? Math.abs(row.normalizedAmount)
         : 0;
 
@@ -207,6 +229,12 @@ export async function buildCsvString(
       row.date,
       row.accountId,
       row.accountName ?? "",
+      row.accountType ?? "",
+      row.accountSubtype ?? "",
+      Boolean(
+        cashFlowDecision?.isLiquidAccount &&
+        cashFlowDecision.exclusionReason !== "Outside selected scope",
+      ),
       row.merchantId ?? "",
       row.merchantName ?? "",
       row.name,
@@ -248,6 +276,9 @@ export async function buildCsvString(
       cashFlowIncomeContributionCents,
       cashFlowExpenseContributionCents,
       cashFlowIncomeContributionCents - cashFlowExpenseContributionCents,
+      cashFlowDecision?.contributionCents ?? 0,
+      cashFlowDecision?.exclusionReason ?? "",
+      cashFlowDecision?.pairedAccountId ?? "",
     ]);
   });
 

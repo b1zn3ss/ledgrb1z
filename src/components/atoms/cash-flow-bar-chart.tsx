@@ -17,15 +17,14 @@ import type { CashFlowRow } from "@/queries/dashboard";
 interface CashFlowBarChartProps {
   data: CashFlowRow[];
   showTrendline?: boolean;
+  terminology?: "cash-flow" | "income-expense";
 }
 
-const chartConfig = {
-  income: { label: "Income", color: INCOME_COLOR },
-  expenses: { label: "Spending", color: SPENDING_COLOR },
-  net: { label: "Net", color: PRIMARY_COLOR },
-} satisfies ChartConfig;
-
-export function CashFlowBarChart({ data, showTrendline = false }: CashFlowBarChartProps) {
+export function CashFlowBarChart({
+  data,
+  showTrendline = false,
+  terminology = "cash-flow",
+}: CashFlowBarChartProps) {
   if (data.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -33,6 +32,21 @@ export function CashFlowBarChart({ data, showTrendline = false }: CashFlowBarCha
       </div>
     );
   }
+
+  const chartConfig = {
+    income: {
+      label: terminology === "cash-flow" ? "Cash In" : "Income",
+      color: INCOME_COLOR,
+    },
+    expenses: {
+      label: terminology === "cash-flow" ? "Cash Out" : "Spending",
+      color: SPENDING_COLOR,
+    },
+    net: {
+      label: terminology === "cash-flow" ? "Net Cash Flow" : "Net",
+      color: PRIMARY_COLOR,
+    },
+  } satisfies ChartConfig;
 
   return (
     // Every caller sizes this chart with an explicit-height parent, so fill it

@@ -381,7 +381,7 @@ describe("getMonthlySpending", () => {
 });
 
 describe("getCashFlow", () => {
-  it("separates income and expenses by month using isIncome category flag", async () => {
+  it("separates liquid cash in and cash out by month using transaction sign", async () => {
     const { householdId } = await insertHousehold(db);
     const { accountId } = await insertAccount(db, householdId);
 
@@ -407,7 +407,7 @@ describe("getCashFlow", () => {
       amount: 4000,
     });
     await insertTransaction(db, householdId, accountId, {
-      date: `${thisMonth}-15`,
+      date: `${thisMonth}-01`,
       normalizedAmount: 150000,
       amount: -150000,
       categoryId: incomeCatId,
@@ -436,7 +436,7 @@ describe("getCashFlow", () => {
     expect(thisMonthData!.net).toBe(150000 - 4000);
   });
 
-  it("excludes transfer transactions", async () => {
+  it("includes an unpaired transfer as boundary movement", async () => {
     const { householdId } = await insertHousehold(db);
     const { accountId } = await insertAccount(db, householdId);
 
@@ -458,7 +458,7 @@ describe("getCashFlow", () => {
 
     const thisMonthData = result.find((r) => r.month === thisMonth);
     expect(thisMonthData).toBeDefined();
-    expect(thisMonthData!.expenses).toBe(3000);
+    expect(thisMonthData!.expenses).toBe(53000);
   });
 });
 

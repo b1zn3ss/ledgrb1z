@@ -50,12 +50,12 @@ describe("getToolCashFlowSummary", () => {
 
     const result = await getToolCashFlowSummary(householdId, RANGE, db);
     expect(result.periods).toEqual([
-      { period: "2026-07", incomeCents: 5000, outflowCents: 2100, netCashFlowCents: 2900 },
-      { period: "2026-08", incomeCents: 0, outflowCents: 1100, netCashFlowCents: -1100 },
+      { period: "2026-07", cashInCents: 8000, cashOutCents: 5200, netCashFlowCents: 2800 },
+      { period: "2026-08", cashInCents: 0, cashOutCents: 1100, netCashFlowCents: -1100 },
     ]);
-    expect(result).toMatchObject({ dateFrom: RANGE.dateFrom, dateTo: RANGE.dateTo, incomeCents: 5000, outflowCents: 3200, netCashFlowCents: 1800, savingsRatePct: 36 });
-    expect(result.incomeCents).toBe(result.periods.reduce((sum, row) => sum + row.incomeCents, 0));
-    expect(result.outflowCents).toBe(result.periods.reduce((sum, row) => sum + row.outflowCents, 0));
+    expect(result).toMatchObject({ dateFrom: RANGE.dateFrom, dateTo: RANGE.dateTo, cashInCents: 8000, cashOutCents: 6300, netCashFlowCents: 1700 });
+    expect(result.cashInCents).toBe(result.periods.reduce((sum, row) => sum + row.cashInCents, 0));
+    expect(result.cashOutCents).toBe(result.periods.reduce((sum, row) => sum + row.cashOutCents, 0));
     expect(result.netCashFlowCents).toBe(result.periods.reduce((sum, row) => sum + row.netCashFlowCents, 0));
   });
 
@@ -72,9 +72,8 @@ describe("getToolCashFlowSummary", () => {
     await insertTransaction(db, householdId, firstAccount.accountId, { date: "2026-06-30", normalizedAmount: -4400, amount: 4400, categoryId: firstCategory.categoryId });
 
     const result = await getToolCashFlowSummary(householdId, { dateFrom: "2026-07-01", dateTo: "2026-07-31", accountIds: [firstAccount.accountId], categoryIds: [firstCategory.categoryId] }, db);
-    expect(result.periods).toEqual([{ period: "2026-07", incomeCents: 0, outflowCents: 1100, netCashFlowCents: -1100 }]);
-    expect(result.outflowCents).toBe(1100);
-    expect(result.savingsRatePct).toBeNull();
+    expect(result.periods).toEqual([{ period: "2026-07", cashInCents: 0, cashOutCents: 1100, netCashFlowCents: -1100 }]);
+    expect(result.cashOutCents).toBe(1100);
   });
 
   test("returns periods deterministically and derives every top-level total from them", async () => {
@@ -87,7 +86,7 @@ describe("getToolCashFlowSummary", () => {
     }
     const result = await getToolCashFlowSummary(householdId, RANGE, db);
     expect(result.periods.map((row) => row.period)).toEqual(["2026-07", "2026-08"]);
-    expect(result).toMatchObject({ incomeCents: 0, outflowCents: 1500, netCashFlowCents: -1500, savingsRatePct: null });
+    expect(result).toMatchObject({ cashInCents: 0, cashOutCents: 1500, netCashFlowCents: -1500 });
   });
 
   test("does not write while producing the summary", async () => {

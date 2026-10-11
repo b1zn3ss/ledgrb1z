@@ -99,26 +99,16 @@ describe("CategoryManager group selection", () => {
     fireEvent.click(renameCategory);
     expect(await screen.findByDisplayValue("Childcare")).not.toBeNull();
   });
-  it("shows both reporting controls for custom categories only", async () => {
+  it("shows only the spending transfer control for custom categories", async () => {
     const { CategoryManager } = await import("./category-manager");
     render(<CategoryManager groups={groups} />);
 
     expect(screen.getAllByRole("checkbox", { name: /^Count transfers in spending reports/ })).toHaveLength(2);
-    expect(screen.getAllByRole("checkbox", { name: /^Count transfers in cash flow/ })).toHaveLength(2);
+    expect(screen.queryByRole("checkbox", { name: /Count transfers in cash flow/ })).toBeNull();
     expect(
       screen.getByRole("checkbox", {
         name: /Count transfers in spending reports for Childcare/,
       }),
     ).not.toBeNull();
-    expect(
-      screen.getByRole("checkbox", {
-        name: /Count transfers in cash flow for Childcare/,
-      }),
-    ).not.toBeNull();
-    expect(
-      screen.queryByRole("checkbox", {
-        name: /Count transfers in cash flow for Groceries/,
-      }),
-    ).toBeNull();
   });
 });
