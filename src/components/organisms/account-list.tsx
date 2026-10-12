@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -16,9 +16,9 @@ import { PlaidLinkFlow } from "./plaid-link-flow";
 import { SimplefinReconnectFlow } from "./simplefin-reconnect-flow";
 import { EditAccountDialog } from "./edit-account-dialog";
 import { triggerSync } from "@/actions/sync";
-import { disconnectPlaidItem } from "@/actions/plaid";
+import { disconnectPlaidItem, recoverIncompletePlaidConnection } from "@/actions/plaid";
 import { disconnectSimplefinConnection } from "@/actions/simplefin";
-import type { InstitutionGroup, AccountRow } from "@/queries/accounts";
+import type { InstitutionGroup, AccountRow, PlaidOnboardingAttemptSummary } from "@/queries/accounts";
 import type { SyncStatus } from "@/components/atoms/sync-status-badge";
 
 type GroupBy = "type" | "institution";
@@ -30,17 +30,26 @@ interface SyncState {
 
 interface AccountListProps {
   groups: InstitutionGroup[];
+  onboardingAttempts: PlaidOnboardingAttemptSummary[];
 }
 
-export function AccountList({ groups }: AccountListProps) {
+export function AccountList({ groups, onboardingAttempts }: AccountListProps) {
   const [groupBy, setGroupBy] = useState<GroupBy>("type");
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null);
   const [syncStates, setSyncStates] = useState<Map<string, SyncState>>(new Map());
   const [reAuthingConnectionId, setReAuthingConnectionId] = useState<string | null>(null);
   const [reAuthError, setReAuthError] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const router = useRouter();
 
-  const connectionIds = groups
+  const incompleteGroups = groups.filter(
+    (group) => group.provider === "plaid" && group.status === "error",
+  );
+  const visibleGroups = groups.filter(
+    (group) => !(group.provider === "plaid" && group.status === "error"),
+  );
+
+  const connectionIds = visibleGroups
     .map((g) => g.connectionId)
     .filter((id): id is string => id !== null);
 
@@ -49,22 +58,22 @@ export function AccountList({ groups }: AccountListProps) {
   const typeGroups = useMemo(
     () =>
       groupAccountsByType(
-        groups.flatMap((g) =>
+        visibleGroups.flatMap((g) =>
           g.accounts.map((a) => ({ ...a, institutionName: g.institutionName })),
         ),
       ),
-    [groups],
+    [visibleGroups],
   );
 
   // The toolbar reports one figure for the whole page, so it takes the most
   // recent sync rather than an arbitrary connection's.
   const freshestSync = useMemo(() => {
-    const times = groups
+    const times = visibleGroups
       .map((g) => g.lastSyncedAt)
       .filter((d): d is Date => d != null)
       .map((d) => new Date(d).getTime());
     return times.length > 0 ? new Date(Math.max(...times)) : null;
-  }, [groups]);
+  }, [visibleGroups]);
 
   const handleGroupByChange = useCallback((value: string[]) => {
     // Base UI hands back an empty array when the active item is clicked again;
@@ -133,10 +142,55 @@ export function AccountList({ groups }: AccountListProps) {
     router.refresh();
   }, [router]);
 
+  const handleRecovery = useCallback(async (connectionId: string) => {
+    setRecoveryError(null);
+    const result = await recoverIncompletePlaidConnection(connectionId, true);
+    if ("error" in result) {
+      setRecoveryError(result.error);
+      return;
+    }
+    router.refresh();
+  }, [router]);
+
   const isSyncing = connectionIds.some((id) => getSyncState(id).status === "syncing");
 
   return (
     <>
+      {(onboardingAttempts.length > 0 || incompleteGroups.length > 0) && (
+        <div className="space-y-3" aria-label="Incomplete Plaid connections">
+          {onboardingAttempts.map((attempt) => (
+            <Card key={attempt.id} className="gap-2 p-4">
+              <div className="flex items-center gap-2 text-destructive">
+                <AlertTriangle className="size-4" />
+                <h3 className="text-sm font-semibold">Incomplete Plaid connection attempt</h3>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Ledgr could not confirm that this Plaid connection was saved. An operator should
+                follow the Plaid onboarding recovery procedure before you reconnect.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Reference: {attempt.id} - Status: {attempt.status} - Updated{" "}
+                {formatRelativeTime(attempt.updatedAt)}
+              </p>
+            </Card>
+          ))}
+          {incompleteGroups.map((group) => (
+            <Card key={group.connectionId}>
+              <InstitutionHeader
+                institutionName={group.institutionName}
+                status={group.status}
+                accountCount={0}
+                connectionId={group.connectionId}
+                lastSyncedAt={group.lastSyncedAt}
+                syncStatus="idle"
+                onRecover={() => group.connectionId && handleRecovery(group.connectionId)}
+                recoveryError={recoveryError}
+              />
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* One toolbar row: the grouping choice and the sync action, anchored to
           each other instead of floating in the gap above the first card. */}
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -173,7 +227,7 @@ export function AccountList({ groups }: AccountListProps) {
             Sync all
             {freshestSync && (
               <span className="ml-1 font-normal text-muted-foreground">
-                · {formatRelativeTime(freshestSync)}
+                Â· {formatRelativeTime(freshestSync)}
               </span>
             )}
           </Button>
@@ -206,7 +260,7 @@ export function AccountList({ groups }: AccountListProps) {
 
       {groupBy === "institution" && (
       <div className="space-y-6">
-        {groups.map((group) => {
+        {visibleGroups.map((group) => {
           const state = getSyncState(group.connectionId);
           return (
             <Card key={group.connectionId ?? "__manual__"}>

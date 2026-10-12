@@ -37,10 +37,12 @@ interface InstitutionHeaderProps {
   lastSyncedAt: Date | string | null;
   syncStatus: SyncStatus;
   syncError?: string;
-  onSync: () => void;
+  onSync?: () => void;
   onDisconnect?: () => void;
+  onRecover?: () => void;
   reconnectButton?: ReactNode;
   reAuthError?: string | null;
+  recoveryError?: string | null;
 }
 
 export function InstitutionHeader({
@@ -55,8 +57,10 @@ export function InstitutionHeader({
   syncError,
   onSync,
   onDisconnect,
+  onRecover,
   reconnectButton,
   reAuthError,
+  recoveryError,
 }: InstitutionHeaderProps) {
   const [disconnectOpen, setDisconnectOpen] = useState(false);
 
@@ -106,22 +110,24 @@ export function InstitutionHeader({
                 <span className="sr-only">Institution actions</span>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" sideOffset={4}>
-                <DropdownMenuItem
-                  disabled={syncStatus === "syncing"}
-                  onClick={onSync}
-                >
-                  <RefreshCw className="size-3.5 mr-2" />
-                  Sync now
-                </DropdownMenuItem>
-                {onDisconnect && (
+                {onSync && (
+                  <DropdownMenuItem
+                    disabled={syncStatus === "syncing"}
+                    onClick={onSync}
+                  >
+                    <RefreshCw className="size-3.5 mr-2" />
+                    Sync now
+                  </DropdownMenuItem>
+                )}
+                {(onDisconnect || onRecover) && (
                   <>
-                    <DropdownMenuSeparator />
+                    {onSync && <DropdownMenuSeparator />}
                     <DropdownMenuItem
                       className="text-destructive focus:text-destructive"
                       onClick={() => setDisconnectOpen(true)}
                     >
                       <Unplug className="size-3.5 mr-2" />
-                      Disconnect
+                      {onRecover ? "Remove incomplete connection" : "Disconnect"}
                     </DropdownMenuItem>
                   </>
                 )}
@@ -135,6 +141,11 @@ export function InstitutionHeader({
           {reAuthError}
         </p>
       )}
+      {recoveryError && (
+        <p role="alert" className="px-4 pb-2 text-xs text-destructive">
+          {recoveryError}
+        </p>
+      )}
 
       <AlertDialog open={disconnectOpen} onOpenChange={setDisconnectOpen}>
         <AlertDialogContent>
@@ -142,11 +153,15 @@ export function InstitutionHeader({
             <AlertDialogMedia className="bg-destructive/10">
               <AlertTriangle className="size-5 text-destructive" />
             </AlertDialogMedia>
-            <AlertDialogTitle>Disconnect {institutionName}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {onRecover ? "Remove incomplete connection?" : `Disconnect ${institutionName}?`}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              This will remove {accountCount} {accountCount === 1 ? "account" : "accounts"} and
-              revoke Ledgr&apos;s access to this institution. Transaction history will be
-              preserved but no longer update. You can reconnect anytime.
+              {onRecover
+                ? "This will ask Plaid to revoke the incomplete Item, then remove its local reservation. No imported accounts will be deleted."
+                : <>This will remove {accountCount} {accountCount === 1 ? "account" : "accounts"} and
+                    revoke Ledgr&apos;s access to this institution. Transaction history will be
+                    preserved but no longer update. You can reconnect anytime.</>}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -155,10 +170,11 @@ export function InstitutionHeader({
               variant="destructive"
               onClick={() => {
                 setDisconnectOpen(false);
-                onDisconnect?.();
+                if (onRecover) onRecover();
+                else onDisconnect?.();
               }}
             >
-              Disconnect
+              {onRecover ? "Remove incomplete connection" : "Disconnect"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

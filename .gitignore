@@ -52,4 +52,5 @@ playwright-report/
 test-results/
 .stryker-tmp/
 docs/*
+!docs/plaid-onboarding-recovery.md
 !docs/images/

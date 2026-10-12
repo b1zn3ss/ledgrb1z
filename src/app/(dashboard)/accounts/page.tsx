@@ -1,5 +1,5 @@
 import { getHouseholdId } from "@/lib/auth/session";
-import { getAccountsByInstitution, getAccountSummary } from "@/queries/accounts";
+import { getAccountsByInstitution, getAccountSummary, getPlaidOnboardingAttempts } from "@/queries/accounts";
 import { centsToDisplay } from "@/lib/money";
 import { StatStrip } from "@/components/molecules/stat-strip";
 import { AccountList } from "@/components/organisms/account-list";
@@ -9,14 +9,15 @@ import { EmptyStateCTA } from "@/components/organisms/empty-state-cta";
 export default async function AccountsPage() {
   const householdId = await getHouseholdId();
 
-  const [groups, summary] = await Promise.all([
+  const [groups, summary, onboardingAttempts] = await Promise.all([
     getAccountsByInstitution(householdId),
     getAccountSummary(householdId),
+    getPlaidOnboardingAttempts(householdId),
   ]);
 
   const hasAccounts = groups.some((g) => g.accounts.length > 0);
 
-  if (!hasAccounts) {
+  if (!hasAccounts && groups.length === 0 && onboardingAttempts.length === 0) {
     return <EmptyStateCTA />;
   }
 
@@ -39,7 +40,7 @@ export default async function AccountsPage() {
         ]}
       />
 
-      <AccountList groups={groups} />
+      <AccountList groups={groups} onboardingAttempts={onboardingAttempts} />
     </div>
   );
 }
