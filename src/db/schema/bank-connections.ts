@@ -35,6 +35,31 @@ export const bankConnections = pgTable("bank_connections", {
   uniqueIndex("idx_bank_connections_plaid_item_id").on(table.plaidItemId),
 ]);
 
+export const PLAID_ONBOARDING_ATTEMPT_STATUSES = [
+  "exchange_pending",
+  "exchange_started",
+  "exchange_failed",
+] as const;
+export type PlaidOnboardingAttemptStatus =
+  (typeof PLAID_ONBOARDING_ATTEMPT_STATUSES)[number];
+
+export const plaidOnboardingAttempts = pgTable("plaid_onboarding_attempts", {
+  id: text("id").primaryKey(),
+  householdId: text("household_id")
+    .notNull()
+    .references(() => households.id, { onDelete: "cascade" }),
+  encryptedPublicToken: text("encrypted_public_token").notNull(),
+  status: text("status", {
+    enum: PLAID_ONBOARDING_ATTEMPT_STATUSES,
+  }).notNull(),
+  errorCode: text("error_code"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  index("idx_plaid_onboarding_attempts_household").on(table.householdId),
+  index("idx_plaid_onboarding_attempts_status").on(table.status),
+]);
+
 export const syncLog = pgTable("sync_log", {
   id: text("id").primaryKey(),
   connectionId: text("connection_id")

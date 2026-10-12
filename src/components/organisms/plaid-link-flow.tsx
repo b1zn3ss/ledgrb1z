@@ -145,15 +145,22 @@ export function PlaidLinkFlow({
 
   if (variant === "dropdown-item") {
     return (
-      <button
-        ref={triggerRef}
-        onClick={handleClick}
-        disabled={isLoading}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-sm hover:bg-muted rounded-sm disabled:opacity-50"
-      >
-        {isLoading ? <Loader2 className="size-4 animate-spin" /> : <Building2 className="size-4" />}
-        {displayLabel}
-      </button>
+      <div>
+        <button
+          ref={triggerRef}
+          onClick={handleClick}
+          disabled={isLoading}
+          className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+        >
+          {isLoading ? <Loader2 className="size-4 animate-spin" /> : <Building2 className="size-4" />}
+          {displayLabel}
+        </button>
+        {error && (
+          <p role="alert" className="px-2 py-1.5 text-xs text-destructive">
+            {error}
+          </p>
+        )}
+      </div>
     );
   }
 

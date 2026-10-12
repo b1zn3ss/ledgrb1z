@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { CountryCode } from "plaid";
 import { getPlaidClient } from "@/lib/plaid/client";
-import { extractPlaidErrorMessage } from "@/lib/plaid/utils";
+import { logPlaidError } from "@/lib/plaid/safe-error";
 import { decrypt } from "@/lib/encryption";
 import { authorizeAction } from "@/lib/auth/authorize-action";
 import { scopedQuery } from "@/lib/scoped-query";
@@ -43,8 +43,8 @@ export async function createUpdateLinkTokenDirect(
     });
     return { linkToken: response.data.link_token };
   } catch (e: unknown) {
-    console.error("Failed to create update link token:", e);
-    return { error: extractPlaidErrorMessage(e) ?? "Failed to initialize re-authentication" };
+    logPlaidError("update link token creation failed", "link/token/create", e);
+    return { error: "Failed to initialize re-authentication" };
   }
 }
 
@@ -91,7 +91,7 @@ export async function completeReAuthDirect(
 
     return { success: true };
   } catch (e: unknown) {
-    console.error("Re-auth completion failed:", e);
+    logPlaidError("re-authentication completion failed", "item/get", e);
     return { error: "Re-authentication verification failed" };
   }
 }

@@ -1,6 +1,6 @@
 import { inArray, and, eq, sql } from "drizzle-orm";
 import { db as defaultDb, type LedgrDb } from "@/db";
-import { accounts, bankConnections, institutionLogos, transactions, ACCOUNT_TYPES, type ConnectionStatus, type BankProvider } from "@/db/schema";
+import { accounts, bankConnections, plaidOnboardingAttempts, institutionLogos, transactions, ACCOUNT_TYPES, type ConnectionStatus, type BankProvider, type PlaidOnboardingAttemptStatus } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted, countRows } from "@/lib/query-helpers";
 import { classifyAccountType } from "@/lib/account-utils";
@@ -84,6 +84,7 @@ export interface InstitutionGroup {
   connectionId: string | null;
   provider: BankProvider | null;
   status: ConnectionStatus | null;
+  errorCode: string | null;
   lastSyncedAt: Date | null;
   logoBase64: string | null;
   primaryColor: string | null;
@@ -114,6 +115,20 @@ export async function getAccountsByInstitution(
   const logoMap = new Map(logos.map((l) => [l.connectionId, l.logo]));
   const groups = new Map<string, InstitutionGroup>();
 
+  for (const item of items) {
+    groups.set(item.id, {
+      institutionName: item.institutionName ?? "Incomplete Plaid connection",
+      connectionId: item.id,
+      provider: item.provider as InstitutionGroup["provider"],
+      status: item.status as InstitutionGroup["status"],
+      errorCode: item.errorCode,
+      lastSyncedAt: item.updatedAt,
+      logoBase64: logoMap.get(item.id) ?? null,
+      primaryColor: item.primaryColor,
+      accounts: [],
+    });
+  }
+
   for (const account of allAccounts) {
     if (account.bankConnectionId) {
       const item = itemMap.get(account.bankConnectionId);
@@ -124,6 +139,7 @@ export async function getAccountsByInstitution(
           connectionId: account.bankConnectionId,
           provider: (item?.provider as InstitutionGroup["provider"]) ?? null,
           status: (item?.status as InstitutionGroup["status"]) ?? null,
+          errorCode: item?.errorCode ?? null,
           lastSyncedAt: item?.updatedAt ?? null,
           logoBase64: logoMap.get(account.bankConnectionId!) ?? null,
           primaryColor: item?.primaryColor ?? null,
@@ -139,6 +155,7 @@ export async function getAccountsByInstitution(
           connectionId: null,
           provider: null,
           status: null,
+          errorCode: null,
           lastSyncedAt: null,
           logoBase64: null,
           primaryColor: null,
@@ -157,6 +174,31 @@ export async function getAccountsByInstitution(
   }
 
   return result;
+}
+
+export interface PlaidOnboardingAttemptSummary {
+  id: string;
+  status: PlaidOnboardingAttemptStatus;
+  errorCode: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export async function getPlaidOnboardingAttempts(
+  householdId: string,
+  db: LedgrDb = defaultDb,
+): Promise<PlaidOnboardingAttemptSummary[]> {
+  const scoped = scopedQuery(householdId, db);
+  return db
+    .select({
+      id: plaidOnboardingAttempts.id,
+      status: plaidOnboardingAttempts.status,
+      errorCode: plaidOnboardingAttempts.errorCode,
+      createdAt: plaidOnboardingAttempts.createdAt,
+      updatedAt: plaidOnboardingAttempts.updatedAt,
+    })
+    .from(plaidOnboardingAttempts)
+    .where(scoped.where(plaidOnboardingAttempts));
 }
 
 export async function getAccountsForImport(
