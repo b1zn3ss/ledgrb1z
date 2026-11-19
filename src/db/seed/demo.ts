@@ -20,6 +20,11 @@ import { seedDefaultCategories } from "@/db/seed/categories";
 import { encrypt } from "@/lib/encryption";
 import { DEMO_HOUSEHOLD_ID } from "@/lib/demo-mode";
 import { withHousehold } from "@/lib/household-context";
+import type { ClassificationDecisionSource } from "@/db/schema";
+import {
+  applyClassificationDecisionInTransaction,
+  CLASSIFICATION_PRIORITY,
+} from "@/lib/categorization/decision-writer";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -450,6 +455,26 @@ export async function seedDemoHousehold(db: LedgrDb = defaultDb): Promise<void> 
     const BATCH_SIZE = 50;
     for (let i = 0; i < txnRows.length; i += BATCH_SIZE) {
       await tx.insert(transactions).values(txnRows.slice(i, i + BATCH_SIZE));
+    }
+    const catNameById = new Map([...catByName].map(([name, id]) => [id, name]));
+    for (const row of txnRows) {
+      if (!row.categoryId || !row.categorySource) continue;
+      await applyClassificationDecisionInTransaction(DEMO_HOUSEHOLD_ID, {
+        transactionId: row.id,
+        categoryId: row.categoryId,
+        source: row.categorySource as ClassificationDecisionSource,
+        decisionPriority: CLASSIFICATION_PRIORITY.legacy,
+        outcome: "legacy_snapshot",
+        engineVersion: "demo-seed-v1",
+        decidedAt: null,
+        evidence: {
+          version: 1,
+          kind: "legacy",
+          category: { id: row.categoryId, name: catNameById.get(row.categoryId)! },
+          observedCategorySource: row.categorySource,
+          historicalDecisionTimeKnown: false,
+        },
+      }, tx);
     }
 
     // ------------------------------------------------------------------

@@ -1,10 +1,11 @@
-import { index, integer, pgTable, pgPolicy, text, boolean, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, pgPolicy, text, boolean, timestamp, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { accounts } from "./accounts";
 import { households } from "./households";
 import { merchants } from "./merchants";
 import { categories } from "./categories";
 import { recurringTransactions } from "./recurring";
+import { transactionClassificationDecisions } from "./classification-decisions";
 
 // `ai_low_confidence` is a real AI assignment, just one the model was unsure
 // of. An uncategorized row has to be edited by hand anyway, so a best guess is
@@ -86,6 +87,10 @@ export const transactions = pgTable(
     pfcPrimary: text("pfc_primary"),
     pfcDetailed: text("pfc_detailed"),
     categorySource: text("category_source"),
+    classificationDecisionId: text("classification_decision_id").references(
+      (): AnyPgColumn => transactionClassificationDecisions.id,
+      { onDelete: "set null" },
+    ),
   },
   (table) => [
     index("idx_txn_account_date").on(table.accountId, table.date),
@@ -130,6 +135,10 @@ export const transactionSplits = pgTable(
     amount: integer("amount").notNull(),
     notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    classificationDecisionId: text("classification_decision_id").references(
+      (): AnyPgColumn => transactionClassificationDecisions.id,
+      { onDelete: "set null" },
+    ),
   },
   (table) => [
     index("idx_splits_txn").on(table.transactionId),

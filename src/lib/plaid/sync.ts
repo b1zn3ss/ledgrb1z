@@ -1,6 +1,10 @@
 import { v4 as uuid } from "uuid";
 import { eq, and, isNull, inArray, sql } from "drizzle-orm";
 import { categorizeSyncedTransactions } from "@/lib/categorization/engine";
+import {
+  applyClassificationDecisionInTransaction,
+  CLASSIFICATION_PRIORITY,
+} from "@/lib/categorization/decision-writer";
 import { applyTransferDetection } from "@/lib/transfer-detection";
 import { computeInvestmentTransferTagging } from "@/lib/investment-transfer-tagging";
 import { syncRecurringTransactions } from "./recurring";
@@ -30,6 +34,11 @@ import {
   transactions,
   accounts,
   merchants,
+  categories,
+  transactionClassificationDecisions,
+  transactionSplits,
+  CLASSIFICATION_DECISION_SOURCES,
+  type ClassificationDecisionSource,
 } from "@/db/schema";
 
 // ---------------------------------------------------------------------------
@@ -475,12 +484,15 @@ async function applyToDb(
 
       const [pendingRow] = await tx
         .select({
+          id: transactions.id,
           categoryId: transactions.categoryId,
           categorySource: transactions.categorySource,
           reviewed: transactions.reviewed,
+          classificationDecisionId: transactions.classificationDecisionId,
         })
         .from(transactions)
         .where(scoped.where(transactions, eq(transactions.externalId, pendingExternalId)))
+        .for("update")
         .limit(1);
 
       await tx.update(transactions)
@@ -502,14 +514,59 @@ async function applyToDb(
           .limit(1);
 
         if (postedTxn) {
-          await tx.update(transactions)
-            .set({
-              categoryId: pendingRow.categoryId,
-              categorySource: pendingRow.categorySource,
-              reviewed: pendingRow.reviewed,
-              updatedAt: now,
-            })
-            .where(scoped.where(transactions, eq(transactions.id, postedTxn.id)));
+          const [sourceDecision] = pendingRow.classificationDecisionId
+            ? await tx.select({
+                id: transactionClassificationDecisions.id,
+                fingerprint: transactionClassificationDecisions.fingerprint,
+                decisionPriority: transactionClassificationDecisions.decisionPriority,
+              }).from(transactionClassificationDecisions)
+                .where(scoped.where(
+                  transactionClassificationDecisions,
+                  eq(transactionClassificationDecisions.id, pendingRow.classificationDecisionId),
+                )).limit(1)
+            : [];
+          const [pendingSplit] = await tx.select({ id: transactionSplits.id })
+            .from(transactionSplits)
+            .where(eq(transactionSplits.transactionId, pendingRow.id))
+            .limit(1);
+          let categoryName: string | null = null;
+          if (pendingRow.categoryId) {
+            const [category] = await tx.select({ name: categories.name })
+              .from(categories)
+              .where(scoped.where(categories, eq(categories.id, pendingRow.categoryId)))
+              .limit(1);
+            categoryName = category?.name ?? null;
+          }
+          const decisionSource: ClassificationDecisionSource =
+            CLASSIFICATION_DECISION_SOURCES.includes(
+              pendingRow.categorySource as ClassificationDecisionSource,
+            )
+              ? pendingRow.categorySource as ClassificationDecisionSource
+              : "legacy_unknown";
+          await applyClassificationDecisionInTransaction(householdId, {
+            transactionId: postedTxn.id,
+            categoryId: pendingRow.categoryId,
+            source: decisionSource,
+            categorySourceValue: pendingRow.categorySource,
+            decisionPriority: pendingRow.categorySource === "manual"
+              ? CLASSIFICATION_PRIORITY.manual
+              : sourceDecision?.decisionPriority ?? CLASSIFICATION_PRIORITY.legacy,
+            outcome: pendingSplit ? "inheritance_limited" : "inherited",
+            evidence: {
+              version: 1,
+              kind: "inheritance",
+              category: pendingRow.categoryId
+                ? { id: pendingRow.categoryId, name: categoryName! }
+                : null,
+              pendingTransactionId: pendingRow.id,
+              sourceDecisionId: sourceDecision?.id ?? null,
+              sourceFingerprint: sourceDecision?.fingerprint ?? null,
+              inheritedCategorySource: pendingRow.categorySource,
+              pendingHadSplits: !!pendingSplit,
+              splitAllocationsMigrated: false,
+            },
+            reviewed: pendingRow.reviewed ?? false,
+          }, tx);
         }
       }
     }

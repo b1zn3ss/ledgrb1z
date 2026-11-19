@@ -7,6 +7,7 @@ import {
   households,
   accounts,
   transactions,
+  transactionClassificationDecisions,
   categories,
   bankConnections,
 } from "../../src/db/schema";
@@ -65,6 +66,7 @@ describe("categorizeSyncedTransactions — PFC tier integration", () => {
       .select({
         categoryId: transactions.categoryId,
         categorySource: transactions.categorySource,
+        classificationDecisionId: transactions.classificationDecisionId,
       })
       .from(transactions)
       .where(eq(transactions.id, "txn-1"));
@@ -81,6 +83,14 @@ describe("categorizeSyncedTransactions — PFC tier integration", () => {
 
     expect(txn?.categoryId).toBe(groceriesCat?.id);
     expect(txn?.categorySource).toBe("pfc");
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, txn!.classificationDecisionId!));
+    expect(decision).toMatchObject({ source: "pfc", categoryId: groceriesCat!.id });
+    expect(decision.evidence).toMatchObject({
+      kind: "pfc",
+      detailedCode: "FOOD_AND_DRINK_GROCERIES",
+      mappedCategoryName: "Groceries",
+    });
   });
 
   it("transactions with null pfcDetailed pass through without error", async () => {
@@ -105,6 +115,36 @@ describe("categorizeSyncedTransactions — PFC tier integration", () => {
       .where(eq(transactions.id, "txn-null"));
 
     expect(txn?.categoryId).toBeNull();
+  });
+
+  it("leaves ambiguous duplicate-name PFC mappings unclassified", async () => {
+    const [groceries] = await db.select({ groupId: categories.groupId })
+      .from(categories)
+      .where(and(eq(categories.householdId, "hh-1"), eq(categories.name, "Groceries")))
+      .limit(1);
+    await db.insert(categories).values({
+      id: "cat-groceries-duplicate",
+      householdId: "hh-1",
+      groupId: groceries.groupId,
+      name: "Groceries",
+    });
+    await db.insert(transactions).values({
+      id: "txn-ambiguous-pfc",
+      accountId: "acc-1",
+      householdId: "hh-1",
+      date: "2026-01-16",
+      originalName: "AMBIGUOUS STORE",
+      name: "Ambiguous Store",
+      amount: 1000,
+      normalizedAmount: -1000,
+      pfcDetailed: "FOOD_AND_DRINK_GROCERIES",
+    });
+
+    await categorizeSyncedTransactions("item-1", "hh-1", db);
+    const [txn] = await db.select().from(transactions)
+      .where(eq(transactions.id, "txn-ambiguous-pfc"));
+    expect(txn.categoryId).toBeNull();
+    expect(txn.classificationDecisionId).toBeNull();
   });
 
   it("isolates PFC resolution between households", async () => {

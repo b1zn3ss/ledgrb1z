@@ -10,6 +10,11 @@ import { notDeleted, countRows } from "@/lib/query-helpers";
 import { authorizeAction } from "@/lib/auth/authorize-action";
 import { getHouseholdId } from "@/lib/auth/session";
 import { withHousehold } from "@/lib/household-context";
+import {
+  applyClassificationDecisionInTransaction,
+  CLASSIFICATION_PRIORITY,
+  recordSplitDeletionDecisionInTransaction,
+} from "@/lib/categorization/decision-writer";
 import { getTransactionDetail, type TransactionDetail } from "@/queries/transactions";
 
 const transactionIdSchema = z.string().min(1);
@@ -230,14 +235,16 @@ export async function upsertSplit(
       .select({
         id: transactions.id,
         normalizedAmount: transactions.normalizedAmount,
+        categoryId: transactions.categoryId,
       })
       .from(transactions)
       .where(scoped.where(transactions, eq(transactions.id, parsedId.data), notDeleted(transactions)))
+      .for("update")
       .limit(1);
     if (!txn) return { error: "Transaction not found" };
 
     const [category] = await tx
-      .select({ id: categories.id })
+      .select({ id: categories.id, name: categories.name })
       .from(categories)
       .where(scoped.where(categories, eq(categories.id, fields.categoryId)))
       .limit(1);
@@ -286,10 +293,43 @@ export async function upsertSplit(
     }
 
     if (existingSplits.length === 0 && !splitId) {
-      await tx.update(transactions)
-        .set({ categorySource: "manual", updatedAt: new Date() })
-        .where(scoped.where(transactions, eq(transactions.id, txn.id)));
+      let parentCategoryName: string | null = null;
+      if (txn.categoryId) {
+        const [parentCategory] = await tx.select({ name: categories.name })
+          .from(categories)
+          .where(scoped.where(categories, eq(categories.id, txn.categoryId)))
+          .limit(1);
+        if (!parentCategory) throw new Error("Parent category not found");
+        parentCategoryName = parentCategory.name;
+      }
+      await applyClassificationDecisionInTransaction(householdId, {
+        transactionId: txn.id,
+        categoryId: txn.categoryId,
+        source: "manual",
+        decisionPriority: CLASSIFICATION_PRIORITY.manual,
+        evidence: {
+          version: 1,
+          kind: "manual",
+          trigger: "split_create",
+          category: txn.categoryId ? { id: txn.categoryId, name: parentCategoryName! } : null,
+        },
+      }, tx);
     }
+
+    await applyClassificationDecisionInTransaction(householdId, {
+      transactionId: txn.id,
+      subjectType: "split",
+      transactionSplitId: savedId,
+      categoryId: fields.categoryId,
+      source: "manual",
+      decisionPriority: CLASSIFICATION_PRIORITY.manual,
+      evidence: {
+        version: 1,
+        kind: "manual",
+        trigger: splitId ? "split_update" : "split_create",
+        category: { id: fields.categoryId, name: category.name },
+      },
+    }, tx);
 
     return {
       data: {
@@ -314,23 +354,35 @@ export async function deleteSplit(
   const parsedSplitId = transactionIdSchema.safeParse(splitId);
   if (!parsedSplitId.success) return { error: "Invalid input" };
 
-  const [split] = await db
-    .select({ id: transactionSplits.id, transactionId: transactionSplits.transactionId })
-    .from(transactionSplits)
-    .where(eq(transactionSplits.id, parsedSplitId.data))
-    .limit(1);
-
-  if (!split) return { error: "Split not found" };
-
   return withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
+    const [split] = await tx
+      .select({ id: transactionSplits.id, transactionId: transactionSplits.transactionId })
+      .from(transactionSplits)
+      .innerJoin(transactions, eq(transactions.id, transactionSplits.transactionId))
+      .where(scoped.where(
+        transactions,
+        eq(transactionSplits.id, parsedSplitId.data),
+        notDeleted(transactions),
+      ))
+      .limit(1);
+
+    if (!split) return { error: "Split not found" };
+
     const [txn] = await tx
-      .select({ id: transactions.id })
+      .select({
+        id: transactions.id,
+        categoryId: transactions.categoryId,
+        categorySource: transactions.categorySource,
+      })
       .from(transactions)
       .where(scoped.where(transactions, eq(transactions.id, split.transactionId), notDeleted(transactions)))
+      .for("update")
       .limit(1);
 
     if (!txn) return { error: "Transaction not found" };
+
+    await recordSplitDeletionDecisionInTransaction(householdId, txn.id, split.id, tx);
 
     await tx.delete(transactionSplits)
       .where(eq(transactionSplits.id, split.id));
@@ -342,9 +394,26 @@ export async function deleteSplit(
       .limit(1);
 
     if (remaining && remaining.count === 0) {
-      await tx.update(transactions)
-        .set({ updatedAt: new Date() })
-        .where(eq(transactions.id, txn.id));
+      let categoryName: string | null = null;
+      if (txn.categoryId) {
+        const [category] = await tx.select({ name: categories.name })
+          .from(categories)
+          .where(scoped.where(categories, eq(categories.id, txn.categoryId)))
+          .limit(1);
+        categoryName = category?.name ?? null;
+      }
+      await applyClassificationDecisionInTransaction(householdId, {
+        transactionId: txn.id,
+        categoryId: txn.categoryId,
+        source: "manual",
+        decisionPriority: CLASSIFICATION_PRIORITY.manual,
+        evidence: {
+          version: 1,
+          kind: "manual",
+          trigger: "split_delete",
+          category: txn.categoryId ? { id: txn.categoryId, name: categoryName! } : null,
+        },
+      }, tx);
     }
 
     return { success: true };

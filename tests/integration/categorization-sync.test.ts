@@ -11,7 +11,7 @@ import {
   insertCategoryRule,
 } from "./helpers";
 import { categorizeSyncedTransactions } from "../../src/lib/categorization/engine";
-import { transactions, bankConnections } from "../../src/db/schema";
+import { transactions, bankConnections, transactionClassificationDecisions } from "../../src/db/schema";
 import { eq } from "drizzle-orm";
 import type { LedgrDb } from "../../src/db";
 
@@ -52,14 +52,19 @@ describe("categorizeSyncedTransactions", () => {
 
     const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
     expect(row!.categoryId).toBe(categoryId);
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, row!.classificationDecisionId!));
+    expect(decision).toMatchObject({ source: "rule", categoryId });
+    expect(decision.evidence).toMatchObject({
+      kind: "rule",
+      rule: { matchField: "name", matchPattern: "whole foods" },
+    });
+    expect(JSON.stringify(decision.evidence)).not.toContain("Whole Foods Market");
   });
 
   it("applies several distinct (category, source) pairs in one pass", async () => {
-    // categorizeSyncedTransactions groups assignments by a composite
-    // `categoryId \0 source` key so each distinct pair becomes one UPDATE.
-    // If that key collided, transactions would be written to the wrong
-    // category or stamped with the wrong source. Exercise it with two
-    // categories reached through two different tiers in a single call.
+    // Exercise two categories reached through different tiers in one pass so
+    // each transaction receives its own state and provenance pointer.
     const { groupId } = await insertCategoryGroup(db, householdId, { name: "Mixed" });
     const { categoryId: ruleCategory } = await insertCategory(db, householdId, groupId, { name: "Coffee" });
     const { categoryId: merchantCategory } = await insertCategory(db, householdId, groupId, { name: "Hardware" });
@@ -90,6 +95,17 @@ describe("categorizeSyncedTransactions", () => {
     expect(ruleRow!.categorySource).toBe("rule");
     expect(merchantRow!.categoryId).toBe(merchantCategory);
     expect(merchantRow!.categorySource).toBe("merchant_default");
+    const [merchantDecision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, merchantRow!.classificationDecisionId!));
+    expect(merchantDecision).toMatchObject({
+      source: "merchant_default",
+      categoryId: merchantCategory,
+      merchantId,
+    });
+    expect(merchantDecision.evidence).toMatchObject({
+      kind: "merchant_default",
+      merchant: { id: merchantId, name: "Ace Hardware" },
+    });
   });
 
   it("respects rule priority — higher wins", async () => {

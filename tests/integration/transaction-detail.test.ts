@@ -10,6 +10,7 @@ import {
   accounts,
   transactions,
   transactionSplits,
+  transactionClassificationDecisions,
   categoryGroups,
   categories,
 } from "@/db/schema";
@@ -253,10 +254,36 @@ describe("upsertSplit", () => {
     }
 
     const [row] = await db
-      .select({ categorySource: transactions.categorySource })
+      .select({
+        categorySource: transactions.categorySource,
+        classificationDecisionId: transactions.classificationDecisionId,
+      })
       .from(transactions)
       .where(eq(transactions.id, splitTxnId));
     expect(row!.categorySource).toBe("manual");
+    const [parentDecision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, row!.classificationDecisionId!));
+    expect(parentDecision).toMatchObject({
+      subjectType: "transaction",
+      source: "manual",
+      evidence: { kind: "manual", trigger: "split_create" },
+    });
+    const [split] = await db.select().from(transactionSplits)
+      .where(eq(transactionSplits.transactionId, splitTxnId))
+      .limit(1);
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, split.classificationDecisionId!));
+    expect(decision).toMatchObject({
+      subjectType: "split",
+      transactionSplitId: split.id,
+      categoryId: catGroceries,
+      source: "manual",
+    });
+    expect(decision.evidence).toMatchObject({
+      kind: "manual",
+      trigger: "split_create",
+    });
+    expect(decision.evidence).not.toHaveProperty("amount");
   });
 
   it("rejects split that exceeds transaction amount", async () => {
@@ -326,6 +353,34 @@ describe("upsertSplit", () => {
       db,
     );
     expect(result).toEqual({ error: "Split not found" });
+  });
+
+  it("serializes concurrent split creation before validating the total", async () => {
+    const concurrentTxnId = uuid();
+    await db.insert(transactions).values({
+      id: concurrentTxnId,
+      accountId,
+      householdId,
+      date: "2026-05-07",
+      originalName: "CONCURRENT SPLIT",
+      name: "Concurrent split",
+      amount: 10000,
+      normalizedAmount: -10000,
+    });
+
+    const results = await Promise.all([
+      upsertSplit(concurrentTxnId, null, { categoryId: catGroceries, amount: 7000, notes: null }, db),
+      upsertSplit(concurrentTxnId, null, { categoryId: catDining, amount: 7000, notes: null }, db),
+    ]);
+
+    expect(results.filter((result) => "data" in result)).toHaveLength(1);
+    expect(results.filter((result) => "error" in result)).toEqual([
+      { error: "Splits exceed transaction amount" },
+    ]);
+    const persisted = await db.select().from(transactionSplits)
+      .where(eq(transactionSplits.transactionId, concurrentTxnId));
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].amount).toBe(7000);
   });
 });
 

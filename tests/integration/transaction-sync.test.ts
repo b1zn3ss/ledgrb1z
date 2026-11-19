@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { http, HttpResponse } from "msw";
 import { v4 as uuid } from "uuid";
 import { createTestDb } from "./setup";
+import { insertCategory, insertCategoryGroup, insertTransactionSplit } from "./helpers";
 import { server } from "../mocks/server";
 import {
   syncWithModifiedHandler,
@@ -19,6 +20,8 @@ import {
   bankConnections,
   accounts,
   transactions,
+  transactionClassificationDecisions,
+  transactionSplits,
   merchants,
   syncLog,
 } from "@/db/schema";
@@ -525,6 +528,132 @@ describe("transaction sync integration", () => {
     expect(postedTxn?.categoryId).toBeNull();
     expect(postedTxn?.categorySource).toBe("manual");
     expect(postedTxn?.reviewed).toBe(false);
+    expect(postedTxn?.classificationDecisionId).not.toBeNull();
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, postedTxn!.classificationDecisionId!));
+    expect(decision).toMatchObject({
+      transactionId: postedTxn!.id,
+      categoryId: null,
+      source: "manual",
+      outcome: "inherited",
+    });
+    expect(decision.evidence).toMatchObject({
+      kind: "inheritance",
+      pendingTransactionId: pendingTxn!.id,
+      pendingHadSplits: false,
+      splitAllocationsMigrated: false,
+    });
+  });
+
+  it("inherits an automated pending classification without converting it to manual", async () => {
+    await setup();
+    await seedTestData(db);
+    const { groupId } = await insertCategoryGroup(db, HOUSEHOLD_ID, { name: "Automated group" });
+    const { categoryId } = await insertCategory(db, HOUSEHOLD_ID, groupId, { name: "Automated category" });
+    const now = new Date();
+    await db.insert(transactions).values({
+      id: uuid(), accountId: "acc-internal-checking", householdId: HOUSEHOLD_ID,
+      externalId: TEST_TXN_IDS.pending1, provider: "plaid", date: "2026-05-03",
+      originalName: "AUTOMATED HOLD", name: "Automated hold", amount: 2000,
+      normalizedAmount: -2000, pending: true, categoryId, categorySource: "rule",
+      createdAt: now, updatedAt: now,
+    });
+    server.use(http.post("https://sandbox.plaid.com/transactions/sync", () =>
+      HttpResponse.json({
+        added: [{
+          transaction_id: TEST_TXN_IDS.posted1,
+          account_id: "plaid-acc-checking",
+          amount: 20,
+          iso_currency_code: "USD",
+          date: "2026-05-03",
+          name: "AUTOMATED HOLD",
+          merchant_name: null,
+          logo_url: null,
+          pending: false,
+          pending_transaction_id: TEST_TXN_IDS.pending1,
+          personal_finance_category: null,
+        }],
+        modified: [], removed: [], has_more: false,
+        next_cursor: "cursor_automated_posted", request_id: "req-automated-posted",
+      })));
+
+    const result = await syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db);
+    expect(result.success).toBe(true);
+    const [posted] = await db.select().from(transactions)
+      .where(eq(transactions.externalId, TEST_TXN_IDS.posted1));
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, posted.classificationDecisionId!));
+    expect(posted.categoryId).toBe(categoryId);
+    expect(posted.categorySource).toBe("rule");
+    expect(decision).toMatchObject({ source: "rule", outcome: "inherited" });
+    expect(decision.evidence).toMatchObject({
+      kind: "inheritance",
+      inheritedCategorySource: "rule",
+    });
+  });
+
+  it("records pending split inheritance as limited without migrating allocations", async () => {
+    await setup();
+    await seedTestData(db);
+    const { groupId } = await insertCategoryGroup(db, HOUSEHOLD_ID, { name: "Split group" });
+    const { categoryId } = await insertCategory(db, HOUSEHOLD_ID, groupId, { name: "Split category" });
+    const pendingId = uuid();
+    const now = new Date();
+    await db.insert(transactions).values({
+      id: pendingId,
+      accountId: "acc-internal-checking",
+      householdId: HOUSEHOLD_ID,
+      externalId: TEST_TXN_IDS.pending1,
+      provider: "plaid",
+      date: "2026-05-03",
+      originalName: "SPLIT HOLD",
+      name: "Split hold",
+      amount: 4000,
+      normalizedAmount: -4000,
+      pending: true,
+      categorySource: "manual",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const { splitId } = await insertTransactionSplit(db, pendingId, categoryId, 2500);
+
+    server.use(http.post("https://sandbox.plaid.com/transactions/sync", () =>
+      HttpResponse.json({
+        added: [{
+          transaction_id: TEST_TXN_IDS.posted1,
+          account_id: "plaid-acc-checking",
+          amount: 40,
+          iso_currency_code: "USD",
+          date: "2026-05-03",
+          name: "SPLIT HOLD",
+          merchant_name: null,
+          logo_url: null,
+          pending: false,
+          pending_transaction_id: TEST_TXN_IDS.pending1,
+          personal_finance_category: null,
+        }],
+        modified: [], removed: [], has_more: false,
+        next_cursor: "cursor_split_posted", request_id: "req-split-posted",
+      })));
+
+    const result = await syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db);
+    expect(result.success).toBe(true);
+    const [posted] = await db.select().from(transactions)
+      .where(eq(transactions.externalId, TEST_TXN_IDS.posted1));
+    const [decision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(transactionClassificationDecisions.id, posted.classificationDecisionId!));
+    expect(decision.outcome).toBe("inheritance_limited");
+    expect(decision.evidence).toMatchObject({
+      kind: "inheritance",
+      pendingHadSplits: true,
+      splitAllocationsMigrated: false,
+    });
+    const [originalSplit] = await db.select().from(transactionSplits)
+      .where(eq(transactionSplits.id, splitId));
+    expect(originalSplit.transactionId).toBe(pendingId);
+    const postedSplits = await db.select().from(transactionSplits)
+      .where(eq(transactionSplits.transactionId, posted.id));
+    expect(postedSplits).toHaveLength(0);
   });
 
   it("keeps the pending row when its posted replacement is skipped (unmapped account)", async () => {
