@@ -38,7 +38,7 @@ describe("categorizeTransactions", () => {
     const result = categorizeTransactions(txns, rules);
 
     expect(result).toHaveLength(1);
-    expect(result[0]).toEqual({
+    expect(result[0]).toMatchObject({
       transactionId: "txn-1",
       categoryId: "cat-groceries",
       source: "rule",

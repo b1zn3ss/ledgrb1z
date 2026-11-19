@@ -10,6 +10,10 @@ import { notDeleted } from "@/lib/query-helpers";
 import { authorizeAction } from "@/lib/auth/authorize-action";
 import { getHouseholdId } from "@/lib/auth/session";
 import { withHousehold } from "@/lib/household-context";
+import {
+  applyClassificationDecisionInTransaction,
+  CLASSIFICATION_PRIORITY,
+} from "@/lib/categorization/decision-writer";
 import { getTransactions, type TransactionFilters, type TransactionPage } from "@/queries/transactions";
 
 const categoryIdSchema = z.string().min(1).nullable();
@@ -27,18 +31,6 @@ const transactionFiltersSchema = z.object({
   transactionType: z.enum(["expense", "credits", "transfer"]).optional(),
 });
 
-function buildCategoryUpdate(categoryId: string | null) {
-  return {
-    categoryId,
-    // A manual clear is still an explicit user decision. Keeping manual
-    // provenance prevents deterministic sync categorization from filling it
-    // back in on the next import.
-    categorySource: "manual" as const,
-    reviewed: categoryId !== null,
-    updatedAt: new Date(),
-  };
-}
-
 export type UpdateTransactionCategoryResult =
   | { success: true; merchantCategoryConflict?: { merchantId: string; currentCategoryId: string } }
   | { error: string };
@@ -55,10 +47,10 @@ export async function updateTransactionCategoryScoped(
     return { error: "Invalid input" };
   }
 
-  const updates = buildCategoryUpdate(parsedCatId.data);
   let merchantCategoryConflict: { merchantId: string; currentCategoryId: string } | undefined;
   let notFound = false;
   let categoryNotFound = false;
+  let categoryName: string | null = null;
 
   await withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
@@ -75,7 +67,7 @@ export async function updateTransactionCategoryScoped(
 
     if (parsedCatId.data !== null) {
       const [category] = await tx
-        .select({ id: categories.id })
+        .select({ id: categories.id, name: categories.name })
         .from(categories)
         .where(scoped.where(categories, eq(categories.id, parsedCatId.data)))
         .limit(1);
@@ -83,11 +75,22 @@ export async function updateTransactionCategoryScoped(
         categoryNotFound = true;
         return;
       }
+      categoryName = category.name;
     }
 
-    await tx.update(transactions)
-      .set(updates)
-      .where(scoped.where(transactions, eq(transactions.id, existing.id)));
+    await applyClassificationDecisionInTransaction(householdId, {
+      transactionId: existing.id,
+      categoryId: parsedCatId.data,
+      source: "manual",
+      decisionPriority: CLASSIFICATION_PRIORITY.manual,
+      evidence: {
+        version: 1,
+        kind: "manual",
+        trigger: "single",
+        category: parsedCatId.data ? { id: parsedCatId.data, name: categoryName! } : null,
+      },
+      reviewed: parsedCatId.data !== null,
+    }, tx);
 
     if (parsedCatId.data === null || !existing.merchantId) {
       return;
@@ -186,14 +189,14 @@ export async function bulkUpdateCategory(
   const auth = await authorizeAction();
   if ("error" in auth) return auth;
   const { householdId } = auth;
-  const updates = buildCategoryUpdate(parsedCatId.data);
   let categoryNotFound = false;
+  let categoryName: string | null = null;
 
   const updatedCount = await withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
     if (parsedCatId.data !== null) {
       const [category] = await tx
-        .select({ id: categories.id })
+        .select({ id: categories.id, name: categories.name })
         .from(categories)
         .where(scoped.where(categories, eq(categories.id, parsedCatId.data)))
         .limit(1);
@@ -201,6 +204,7 @@ export async function bulkUpdateCategory(
         categoryNotFound = true;
         return 0;
       }
+      categoryName = category.name;
     }
 
     const owned = await tx
@@ -216,10 +220,22 @@ export async function bulkUpdateCategory(
 
     if (owned.length === 0) return 0;
 
-    const ownedIds = owned.map((r) => r.id);
-    await tx.update(transactions)
-      .set(updates)
-      .where(scoped.where(transactions, inArray(transactions.id, ownedIds)));
+    const ownedIds = owned.map((r) => r.id).sort();
+    for (const id of ownedIds) {
+      await applyClassificationDecisionInTransaction(householdId, {
+        transactionId: id,
+        categoryId: parsedCatId.data,
+        source: "manual",
+        decisionPriority: CLASSIFICATION_PRIORITY.manual,
+        evidence: {
+          version: 1,
+          kind: "manual",
+          trigger: "bulk",
+          category: parsedCatId.data ? { id: parsedCatId.data, name: categoryName! } : null,
+        },
+        reviewed: parsedCatId.data !== null,
+      }, tx);
+    }
     return ownedIds.length;
   }, db);
 

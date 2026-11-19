@@ -14,7 +14,7 @@ import {
   bulkUpdateCategory,
   bulkMarkReviewed,
 } from "../../src/actions/transactions";
-import { transactions, merchants } from "../../src/db/schema";
+import { transactions, merchants, transactionClassificationDecisions } from "../../src/db/schema";
 import { eq } from "drizzle-orm";
 import type { LedgrDb } from "../../src/db";
 
@@ -72,6 +72,10 @@ describe("transaction actions", () => {
       expect(row!.categoryId).toBeNull();
       expect(row!.categorySource).toBe("manual");
       expect(row!.reviewed).toBe(false);
+      const [decision] = await db.select().from(transactionClassificationDecisions)
+        .where(eq(transactionClassificationDecisions.id, row!.classificationDecisionId!));
+      expect(decision).toMatchObject({ categoryId: null, source: "manual", outcome: "applied" });
+      expect(decision.evidence).toMatchObject({ kind: "manual", trigger: "single" });
     });
 
     it("does not create a merchant-wide default from one manual categorization", async () => {
@@ -175,6 +179,10 @@ describe("transaction actions", () => {
       expect(row!.categoryId).toBeNull();
       expect(row!.categorySource).toBe("manual");
       expect(row!.reviewed).toBe(false);
+      const [decision] = await db.select().from(transactionClassificationDecisions)
+        .where(eq(transactionClassificationDecisions.id, row!.classificationDecisionId!));
+      expect(decision).toMatchObject({ categoryId: null, source: "manual", outcome: "applied" });
+      expect(decision.evidence).toMatchObject({ kind: "manual", trigger: "bulk" });
     });
 
     it("rejects a category owned by another household", async () => {
