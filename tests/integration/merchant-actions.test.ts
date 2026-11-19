@@ -55,6 +55,19 @@ describe("updateMerchantDefaultCategory", () => {
     expect(row!.categoryId).toBeNull();
   });
 
+  it("rejects a category belonging to another household", async () => {
+    const { merchantId } = await insertMerchant(db, mockHouseholdId);
+    const { householdId: otherHouseholdId } = await insertHousehold(db, "Other category owner");
+    const { groupId: otherGroupId } = await insertCategoryGroup(db, otherHouseholdId);
+    const { categoryId: otherCategoryId } = await insertCategory(db, otherHouseholdId, otherGroupId);
+
+    const result = await updateMerchantDefaultCategory(merchantId, otherCategoryId, db);
+    expect(result).toEqual({ error: "Category not found" });
+
+    const [row] = await db.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(row!.categoryId).toBeNull();
+  });
+
   it("returns an error for a nonexistent merchant", async () => {
     const result = await updateMerchantDefaultCategory("no-such-merchant", categoryId, db);
     expect(result).toEqual({ error: "Merchant not found" });

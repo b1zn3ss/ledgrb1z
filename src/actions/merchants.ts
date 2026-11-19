@@ -4,9 +4,10 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db as defaultDb, type LedgrDb } from "@/db";
-import { merchants } from "@/db/schema";
+import { categories, merchants } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
 import { authorizeAction } from "@/lib/auth/authorize-action";
+import { withHousehold } from "@/lib/household-context";
 
 const merchantIdSchema = z.string().min(1);
 const categoryIdSchema = z.string().min(1);
@@ -23,18 +24,27 @@ export async function updateMerchantDefaultCategoryScoped(
     return { error: "Invalid input" };
   }
 
-  const scoped = scopedQuery(householdId, db);
-  const updated = await db.update(merchants)
-    .set({ categoryId: parsedCategoryId.data, updatedAt: new Date() })
-    .where(scoped.where(merchants, eq(merchants.id, parsedMerchantId.data)))
-    .returning({ id: merchants.id });
+  const result = await withHousehold(householdId, async (tx) => {
+    const scoped = scopedQuery(householdId, tx);
+    const [category] = await tx
+      .select({ id: categories.id })
+      .from(categories)
+      .where(scoped.where(categories, eq(categories.id, parsedCategoryId.data)))
+      .limit(1);
+    if (!category) return { error: "Category not found" } as const;
 
-  if (updated.length === 0) {
-    return { error: "Merchant not found" };
-  }
+    const updated = await tx.update(merchants)
+      .set({ categoryId: parsedCategoryId.data, updatedAt: new Date() })
+      .where(scoped.where(merchants, eq(merchants.id, parsedMerchantId.data)))
+      .returning({ id: merchants.id });
+    if (updated.length === 0) return { error: "Merchant not found" } as const;
+    return { success: true } as const;
+  }, db);
+
+  if ("error" in result) return result;
 
   revalidatePath("/transactions");
-  return { success: true };
+  return result;
 }
 
 export async function updateMerchantDefaultCategory(

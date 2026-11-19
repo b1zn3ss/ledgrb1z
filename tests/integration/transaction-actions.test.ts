@@ -64,16 +64,17 @@ describe("transaction actions", () => {
       expect(row!.reviewed).toBe(true);
     });
 
-    it("clearing category (null) sets reviewed to false", async () => {
+    it("protects an explicit category clear as a manual decision", async () => {
       const result = await updateTransactionCategory(txnId, null, db);
       expect(result).toEqual({ success: true });
 
       const [row] = await db.select().from(transactions).where(eq(transactions.id, txnId));
       expect(row!.categoryId).toBeNull();
+      expect(row!.categorySource).toBe("manual");
       expect(row!.reviewed).toBe(false);
     });
 
-    it("also sets the merchant's default category so future syncs pick it up (ISSUE-004)", async () => {
+    it("does not create a merchant-wide default from one manual categorization", async () => {
       const { merchantId } = await insertMerchant(db, mockHouseholdId);
       const { transactionId } = await insertTransaction(db, mockHouseholdId, accountId, { merchantId });
 
@@ -81,7 +82,21 @@ describe("transaction actions", () => {
       expect(result).toEqual({ success: true });
 
       const [merchantRow] = await db.select().from(merchants).where(eq(merchants.id, merchantId));
-      expect(merchantRow!.categoryId).toBe(categoryId);
+      expect(merchantRow!.categoryId).toBeNull();
+    });
+
+    it("rejects a category owned by another household", async () => {
+      const { transactionId } = await insertTransaction(db, mockHouseholdId, accountId);
+      const { householdId: otherHouseholdId } = await insertHousehold(db, "Other category owner");
+      const { groupId: otherGroupId } = await insertCategoryGroup(db, otherHouseholdId);
+      const { categoryId: otherCategoryId } = await insertCategory(db, otherHouseholdId, otherGroupId);
+
+      const result = await updateTransactionCategory(transactionId, otherCategoryId, db);
+      expect(result).toEqual({ error: "Category not found" });
+
+      const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+      expect(row!.categoryId).toBeNull();
+      expect(row!.categorySource).toBeNull();
     });
 
     it("does not clear the merchant's default category when clearing a transaction's category", async () => {
@@ -147,6 +162,34 @@ describe("transaction actions", () => {
   });
 
   describe("bulkUpdateCategory", () => {
+    it("protects bulk category clears as manual decisions", async () => {
+      const { transactionId } = await insertTransaction(db, mockHouseholdId, accountId, {
+        categoryId,
+        reviewed: true,
+      });
+
+      const result = await bulkUpdateCategory([transactionId], null, db);
+      expect(result).toEqual({ success: true, updatedCount: 1 });
+
+      const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+      expect(row!.categoryId).toBeNull();
+      expect(row!.categorySource).toBe("manual");
+      expect(row!.reviewed).toBe(false);
+    });
+
+    it("rejects a category owned by another household", async () => {
+      const { transactionId } = await insertTransaction(db, mockHouseholdId, accountId);
+      const { householdId: otherHouseholdId } = await insertHousehold(db, "Other bulk category owner");
+      const { groupId: otherGroupId } = await insertCategoryGroup(db, otherHouseholdId);
+      const { categoryId: otherCategoryId } = await insertCategory(db, otherHouseholdId, otherGroupId);
+
+      const result = await bulkUpdateCategory([transactionId], otherCategoryId, db);
+      expect(result).toEqual({ error: "Category not found" });
+
+      const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+      expect(row!.categoryId).toBeNull();
+    });
+
     it("only updates transactions belonging to the session household", async () => {
       const { transactionId: ownTxn } = await insertTransaction(db, mockHouseholdId, accountId);
 

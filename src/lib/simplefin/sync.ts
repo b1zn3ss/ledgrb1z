@@ -545,23 +545,6 @@ async function doSync(
       console.error("Recurring detection failed for connection", JSON.stringify(connectionId), recurringError);
     }
 
-    // AI categorization and merchant/logo resolution — fire-and-forget, same
-    // pattern as syncInvestments in actions/sync.ts. Both are household-scoped
-    // (not just this connection's transactions) and internally coalesced, so
-    // it's safe for several connections to trigger them concurrently without
-    // blocking the sync response on LLM round-trips.
-    import("@/lib/ai/categorize")
-      .then(({ categorizeWithAi }) => categorizeWithAi(householdId, db))
-      .catch((aiError) => {
-        console.error("AI categorization failed for connection", JSON.stringify(connectionId), aiError);
-      });
-
-    import("@/lib/ai/resolve-merchants")
-      .then(({ resolveMerchantLogos }) => resolveMerchantLogos(householdId, db))
-      .catch((merchantError) => {
-        console.error("AI merchant resolution failed for connection", JSON.stringify(connectionId), merchantError);
-      });
-
     return {
       success: true,
       addedCount: counts.addedCount,

@@ -140,6 +140,26 @@ describe("categorizeSyncedTransactions", () => {
     expect(row!.categoryId).toBe(manualCat);
   });
 
+  it("never fills an explicitly cleared manual category", async () => {
+    const { groupId } = await insertCategoryGroup(db, householdId, { name: "Manual clears" });
+    const { categoryId: ruleCat } = await insertCategory(db, householdId, groupId, { name: "Rule target" });
+    await insertCategoryRule(db, householdId, ruleCat, { matchPattern: "leave-uncategorized" });
+
+    const { transactionId } = await insertTransaction(db, householdId, accountId, {
+      name: "leave-uncategorized store",
+      categoryId: null,
+      categorySource: "manual",
+      reviewed: false,
+    });
+
+    await categorizeSyncedTransactions(plaidItemId, householdId, db);
+
+    const [row] = await db.select().from(transactions).where(eq(transactions.id, transactionId));
+    expect(row!.categoryId).toBeNull();
+    expect(row!.categorySource).toBe("manual");
+    expect(row!.reviewed).toBe(false);
+  });
+
   it("categorization failure does not throw", async () => {
     await expect(
       categorizeSyncedTransactions("nonexistent-item", householdId, db),

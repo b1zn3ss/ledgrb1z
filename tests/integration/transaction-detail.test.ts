@@ -289,6 +289,44 @@ describe("upsertSplit", () => {
       expect(result.data.notes).toBe("Updated");
     }
   });
+
+  it("rejects a split category owned by another household", async () => {
+    const otherHouseholdId = uuid();
+    const otherGroupId = uuid();
+    const otherCategoryId = uuid();
+    await db.insert(households).values({ id: otherHouseholdId, name: "Other" });
+    await db.insert(categoryGroups).values({
+      id: otherGroupId,
+      householdId: otherHouseholdId,
+      name: "Other",
+      sortOrder: 1,
+    });
+    await db.insert(categories).values({
+      id: otherCategoryId,
+      householdId: otherHouseholdId,
+      groupId: otherGroupId,
+      name: "Other category",
+      sortOrder: 1,
+    });
+
+    const result = await upsertSplit(
+      splitTxnId,
+      null,
+      { categoryId: otherCategoryId, amount: 1000, notes: null },
+      db,
+    );
+    expect(result).toEqual({ error: "Category not found" });
+  });
+
+  it("cannot update a split belonging to another transaction", async () => {
+    const result = await upsertSplit(
+      splitTxnId,
+      splitId1,
+      { categoryId: catDining, amount: 1000, notes: null },
+      db,
+    );
+    expect(result).toEqual({ error: "Split not found" });
+  });
 });
 
 describe("deleteSplit", () => {

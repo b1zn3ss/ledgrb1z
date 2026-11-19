@@ -1,4 +1,4 @@
-import { eq, and, isNull, inArray } from "drizzle-orm";
+import { eq, isNull, inArray, ne, or } from "drizzle-orm";
 import type { LedgrDb } from "@/db";
 import { transactions, merchants, categoryRules, accounts, categories } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
@@ -36,7 +36,7 @@ export function categorizeTransactions(
 ): CategoryAssignment[] {
   // Lowercase each rule's pattern once (R work) rather than per transaction.
   const sorted = [...rules]
-    .sort((a, b) => b.priority - a.priority)
+    .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))
     .map((rule) => ({ ...rule, patternLower: rule.matchPattern.toLowerCase() }));
   const assignments: CategoryAssignment[] = [];
 
@@ -115,7 +115,7 @@ async function doCategorizeSyncedTransactions(
   const allCategories = await db
     .select({ id: categories.id, name: categories.name })
     .from(categories)
-    .where(eq(categories.householdId, householdId));
+    .where(scoped.where(categories));
   const catNameToId = new Map(allCategories.map((c) => [c.name, c.id]));
   const pfcCategoryMap = new Map<string, string>();
   for (const [pfcCode, catName] of Object.entries(PFC_DETAILED_TO_CATEGORY)) {
@@ -126,12 +126,7 @@ async function doCategorizeSyncedTransactions(
   const itemAccounts = await db
     .select({ id: accounts.id })
     .from(accounts)
-    .where(
-      and(
-        eq(accounts.householdId, householdId),
-        eq(accounts.bankConnectionId, connectionId),
-      ),
-    );
+    .where(scoped.where(accounts, eq(accounts.bankConnectionId, connectionId)));
 
   if (itemAccounts.length === 0) return;
 
@@ -145,14 +140,13 @@ async function doCategorizeSyncedTransactions(
       pfcDetailed: transactions.pfcDetailed,
     })
     .from(transactions)
-    .where(
-      and(
-        eq(transactions.householdId, householdId),
-        inArray(transactions.accountId, accountIds),
-        isNull(transactions.categoryId),
-        notDeleted(transactions),
-      ),
-    );
+    .where(scoped.where(
+      transactions,
+      inArray(transactions.accountId, accountIds),
+      isNull(transactions.categoryId),
+      or(isNull(transactions.categorySource), ne(transactions.categorySource, "manual")),
+      notDeleted(transactions),
+    ));
 
   if (uncategorized.length === 0) return;
 
@@ -164,7 +158,7 @@ async function doCategorizeSyncedTransactions(
     const merchantRows = await db
       .select({ id: merchants.id, name: merchants.name, categoryId: merchants.categoryId })
       .from(merchants)
-      .where(inArray(merchants.id, merchantIds));
+      .where(scoped.where(merchants, inArray(merchants.id, merchantIds)));
     for (const m of merchantRows) {
       merchantMap.set(m.id, { name: m.name, categoryId: m.categoryId });
     }
@@ -209,6 +203,11 @@ async function doCategorizeSyncedTransactions(
         categorySource: group.source,
         updatedAt: now,
       })
-      .where(inArray(transactions.id, group.ids));
+      .where(scoped.where(
+        transactions,
+        inArray(transactions.id, group.ids),
+        isNull(transactions.categoryId),
+        or(isNull(transactions.categorySource), ne(transactions.categorySource, "manual")),
+      ));
   }
 }

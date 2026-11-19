@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { eq } from "drizzle-orm";
 import { createTestDb } from "./setup";
@@ -15,6 +15,12 @@ import {
   insertCategoryRule,
 } from "./helpers";
 import type { LedgrDb } from "@/db";
+
+const categorizeWithAi = vi.hoisted(() => vi.fn(async () => ({ categorized: 0, skipped: 0 })));
+const resolveMerchantLogos = vi.hoisted(() => vi.fn(async () => ({ resolved: 0, skipped: 0 })));
+
+vi.mock("@/lib/ai/categorize", () => ({ categorizeWithAi }));
+vi.mock("@/lib/ai/resolve-merchants", () => ({ resolveMerchantLogos }));
 
 // MSW mocks fetch, not DNS — the SSRF guard in lib/simplefin/client.ts does a
 // real dns.lookup() before fetching, so it needs mocking too or these tests
@@ -36,6 +42,11 @@ describe("syncConnection", () => {
   let db: LedgrDb;
   let close: (() => Promise<void>) | undefined;
 
+  beforeEach(() => {
+    categorizeWithAi.mockClear();
+    resolveMerchantLogos.mockClear();
+  });
+
   afterEach(async () => {
     server.resetHandlers();
     await close?.();
@@ -53,6 +64,17 @@ describe("syncConnection", () => {
     });
     return { householdId, connectionId, accountId };
   }
+
+  it("does not trigger LLM classification or merchant inference after sync", async () => {
+    const { householdId, connectionId } = await setupWithAccount();
+
+    const result = await syncConnection(connectionId, householdId, db);
+    expect(result.success).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(categorizeWithAi).not.toHaveBeenCalled();
+    expect(resolveMerchantLogos).not.toHaveBeenCalled();
+  });
 
   it("inserts transactions with amount === normalizedAmount (no Plaid-style sign flip)", async () => {
     const { householdId, connectionId } = await setupWithAccount();

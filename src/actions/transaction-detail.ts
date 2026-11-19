@@ -1,10 +1,10 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import { db as defaultDb, type LedgrDb } from "@/db";
-import { transactions, transactionSplits } from "@/db/schema";
+import { categories, transactions, transactionSplits } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted, countRows } from "@/lib/query-helpers";
 import { authorizeAction } from "@/lib/auth/authorize-action";
@@ -222,9 +222,11 @@ export async function upsertSplit(
   const parsedData = splitSchema.safeParse(data);
   if (!parsedId.success || !parsedData.success) return { error: "Invalid input" };
 
-  const txn = await withHousehold(householdId, async (tx) => {
+  const fields = parsedData.data;
+
+  return withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
-    const [row] = await tx
+    const [txn] = await tx
       .select({
         id: transactions.id,
         normalizedAmount: transactions.normalizedAmount,
@@ -232,15 +234,16 @@ export async function upsertSplit(
       .from(transactions)
       .where(scoped.where(transactions, eq(transactions.id, parsedId.data), notDeleted(transactions)))
       .limit(1);
-    return row ?? null;
-  }, db);
+    if (!txn) return { error: "Transaction not found" };
 
-  if (!txn) return { error: "Transaction not found" };
+    const [category] = await tx
+      .select({ id: categories.id })
+      .from(categories)
+      .where(scoped.where(categories, eq(categories.id, fields.categoryId)))
+      .limit(1);
+    if (!category) return { error: "Category not found" };
 
-  const fields = parsedData.data;
-  const maxAmount = Math.abs(txn.normalizedAmount);
-
-  return db.transaction(async (tx) => {
+    const maxAmount = Math.abs(txn.normalizedAmount);
     const existingSplits = await tx
       .select({ id: transactionSplits.id, amount: transactionSplits.amount })
       .from(transactionSplits)
@@ -257,13 +260,18 @@ export async function upsertSplit(
     let savedId: string;
 
     if (splitId) {
-      await tx.update(transactionSplits)
+      const updated = await tx.update(transactionSplits)
         .set({
           categoryId: fields.categoryId,
           amount: fields.amount,
           notes: fields.notes,
         })
-        .where(eq(transactionSplits.id, splitId));
+        .where(and(
+          eq(transactionSplits.id, splitId),
+          eq(transactionSplits.transactionId, txn.id),
+        ))
+        .returning({ id: transactionSplits.id });
+      if (updated.length === 0) return { error: "Split not found" };
       savedId = splitId;
     } else {
       savedId = uuid();
@@ -280,7 +288,7 @@ export async function upsertSplit(
     if (existingSplits.length === 0 && !splitId) {
       await tx.update(transactions)
         .set({ categorySource: "manual", updatedAt: new Date() })
-        .where(eq(transactions.id, txn.id));
+        .where(scoped.where(transactions, eq(transactions.id, txn.id)));
     }
 
     return {
@@ -291,7 +299,7 @@ export async function upsertSplit(
         notes: fields.notes ?? null,
       },
     };
-  });
+  }, db);
 }
 
 

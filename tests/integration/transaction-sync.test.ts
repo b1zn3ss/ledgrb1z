@@ -24,6 +24,12 @@ import {
 } from "@/db/schema";
 import type { LedgrDb } from "@/db";
 
+const categorizeWithAi = vi.hoisted(() => vi.fn(async () => ({ categorized: 0, skipped: 0 })));
+const resolveMerchantLogos = vi.hoisted(() => vi.fn(async () => ({ resolved: 0, skipped: 0 })));
+
+vi.mock("@/lib/ai/categorize", () => ({ categorizeWithAi }));
+vi.mock("@/lib/ai/resolve-merchants", () => ({ resolveMerchantLogos }));
+
 const HOUSEHOLD_ID = "hh-test-sync";
 const PLAID_ITEM_ID = "plaid-item-sync-test";
 
@@ -46,6 +52,8 @@ describe("transaction sync integration", () => {
 
   beforeEach(() => {
     resetPlaidClient();
+    categorizeWithAi.mockClear();
+    resolveMerchantLogos.mockClear();
   });
 
   afterEach(async () => {
@@ -98,6 +106,19 @@ describe("transaction sync integration", () => {
       updatedAt: now,
     });
   }
+
+  it("does not trigger LLM classification or merchant inference after sync", async () => {
+    await setup();
+    await seedTestData(db);
+    server.use(syncEmptyHandler);
+
+    const result = await syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db);
+    expect(result.success).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(categorizeWithAi).not.toHaveBeenCalled();
+    expect(resolveMerchantLogos).not.toHaveBeenCalled();
+  });
 
   it("multi-page pagination drains all pages", async () => {
     await setup();
@@ -434,7 +455,7 @@ describe("transaction sync integration", () => {
     expect(row.amount).toBe(2500);
   });
 
-  it("pending-to-posted transition soft-deletes pending row", async () => {
+  it("pending-to-posted transition preserves an explicit manual category clear", async () => {
     await setup();
     await seedTestData(db);
 
@@ -452,6 +473,9 @@ describe("transaction sync integration", () => {
       normalizedAmount: -3599,
       currency: "USD",
       pending: true,
+      categoryId: null,
+      categorySource: "manual",
+      reviewed: false,
       createdAt: now,
       updatedAt: now,
     });
@@ -498,6 +522,9 @@ describe("transaction sync integration", () => {
       .where(eq(transactions.externalId, TEST_TXN_IDS.posted1));
     expect(postedTxn).toBeDefined();
     expect(postedTxn?.pending).toBe(false);
+    expect(postedTxn?.categoryId).toBeNull();
+    expect(postedTxn?.categorySource).toBe("manual");
+    expect(postedTxn?.reviewed).toBe(false);
   });
 
   it("keeps the pending row when its posted replacement is skipped (unmapped account)", async () => {
