@@ -22,6 +22,7 @@ import {
 import { titleCase } from "@/lib/text-utils";
 import { cleanTransactionName } from "@/lib/import/clean-name";
 import { withHousehold } from "@/lib/household-context";
+import { scopedQuery } from "@/lib/scoped-query";
 import type { LedgrDb } from "@/db";
 import {
   bankConnections,
@@ -253,6 +254,7 @@ async function applyToDb(
   const now = new Date();
 
   return withHousehold(householdId, async (tx) => {
+    const scoped = scopedQuery(householdId, tx);
     // --- Build account lookup: plaid_account_id → internal account id ---
     const accountRows = await tx
       .select({
@@ -478,20 +480,21 @@ async function applyToDb(
           reviewed: transactions.reviewed,
         })
         .from(transactions)
-        .where(eq(transactions.externalId, pendingExternalId))
+        .where(scoped.where(transactions, eq(transactions.externalId, pendingExternalId)))
         .limit(1);
 
       await tx.update(transactions)
         .set({ deletedAt: now, updatedAt: now })
-        .where(eq(transactions.externalId, pendingExternalId));
+        .where(scoped.where(transactions, eq(transactions.externalId, pendingExternalId)));
 
-      // If the pending transaction was manually categorized, copy to the posted version
-      if (pendingRow?.categoryId) {
+      // Preserve both a manual category and an explicit manual clear.
+      if (pendingRow?.categorySource === "manual" || pendingRow?.categoryId) {
         const [postedTxn] = await tx
           .select({ id: transactions.id })
           .from(transactions)
           .where(
-            and(
+            scoped.where(
+              transactions,
               eq(transactions.pendingTransactionId, pendingExternalId),
               isNull(transactions.deletedAt),
             ),
@@ -506,7 +509,7 @@ async function applyToDb(
               reviewed: pendingRow.reviewed,
               updatedAt: now,
             })
-            .where(eq(transactions.id, postedTxn.id));
+            .where(scoped.where(transactions, eq(transactions.id, postedTxn.id)));
         }
       }
     }
@@ -672,23 +675,6 @@ async function doSync(
     } catch (recurringError) {
       console.error("Recurring sync failed for item", JSON.stringify(itemId), recurringError);
     }
-
-    // AI categorization and merchant/logo resolution — fire-and-forget, same
-    // pattern as syncInvestments in actions/sync.ts. Both are household-scoped
-    // (not just this item's transactions) and internally coalesced, so it's
-    // safe for several items to trigger them concurrently without blocking
-    // the sync response on LLM round-trips.
-    import("@/lib/ai/categorize")
-      .then(({ categorizeWithAi }) => categorizeWithAi(householdId, db))
-      .catch((aiError) => {
-        console.error("AI categorization failed for item", JSON.stringify(itemId), aiError);
-      });
-
-    import("@/lib/ai/resolve-merchants")
-      .then(({ resolveMerchantLogos }) => resolveMerchantLogos(householdId, db))
-      .catch((merchantError) => {
-        console.error("AI merchant resolution failed for item", JSON.stringify(itemId), merchantError);
-      });
 
     return {
       success: true,

@@ -69,6 +69,25 @@ describe("categorizeTransactions", () => {
     expect(result[0].categoryId).toBe("cat-coffee");
   });
 
+  it("uses rule id as a stable tie-breaker for equal priorities", () => {
+    const txns = [makeTxn({ name: "Starbucks Coffee" })];
+    const firstById = makeRule({
+      id: "rule-a",
+      matchPattern: "starbucks",
+      categoryId: "cat-a",
+      priority: 10,
+    });
+    const secondById = makeRule({
+      id: "rule-b",
+      matchPattern: "starbucks",
+      categoryId: "cat-b",
+      priority: 10,
+    });
+
+    expect(categorizeTransactions(txns, [firstById, secondById])[0]?.categoryId).toBe("cat-a");
+    expect(categorizeTransactions(txns, [secondById, firstById])[0]?.categoryId).toBe("cat-a");
+  });
+
   it("falls back to merchant default when no rule matches", () => {
     const txns = [makeTxn({ name: "XYZ Corp", merchantCategoryId: "cat-misc", merchantId: "m-1" })];
     const rules = [makeRule({ matchPattern: "no-match" })];

@@ -4,7 +4,7 @@ import { eq, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db as defaultDb, type LedgrDb } from "@/db";
-import { transactions, merchants } from "@/db/schema";
+import { transactions, merchants, categories } from "@/db/schema";
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted } from "@/lib/query-helpers";
 import { authorizeAction } from "@/lib/auth/authorize-action";
@@ -30,7 +30,10 @@ const transactionFiltersSchema = z.object({
 function buildCategoryUpdate(categoryId: string | null) {
   return {
     categoryId,
-    categorySource: categoryId !== null ? ("manual" as const) : null,
+    // A manual clear is still an explicit user decision. Keeping manual
+    // provenance prevents deterministic sync categorization from filling it
+    // back in on the next import.
+    categorySource: "manual" as const,
     reviewed: categoryId !== null,
     updatedAt: new Date(),
   };
@@ -55,6 +58,7 @@ export async function updateTransactionCategoryScoped(
   const updates = buildCategoryUpdate(parsedCatId.data);
   let merchantCategoryConflict: { merchantId: string; currentCategoryId: string } | undefined;
   let notFound = false;
+  let categoryNotFound = false;
 
   await withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
@@ -69,9 +73,21 @@ export async function updateTransactionCategoryScoped(
       return;
     }
 
+    if (parsedCatId.data !== null) {
+      const [category] = await tx
+        .select({ id: categories.id })
+        .from(categories)
+        .where(scoped.where(categories, eq(categories.id, parsedCatId.data)))
+        .limit(1);
+      if (!category) {
+        categoryNotFound = true;
+        return;
+      }
+    }
+
     await tx.update(transactions)
       .set(updates)
-      .where(eq(transactions.id, existing.id));
+      .where(scoped.where(transactions, eq(transactions.id, existing.id)));
 
     if (parsedCatId.data === null || !existing.merchantId) {
       return;
@@ -83,13 +99,7 @@ export async function updateTransactionCategoryScoped(
       .where(scoped.where(merchants, eq(merchants.id, existing.merchantId)))
       .limit(1);
 
-    if (!merchant || merchant.categoryId === null) {
-      // No existing default to conflict with — safe to set it automatically. This is
-      // the common case: the first time we've seen this merchant get manually categorized.
-      await tx.update(merchants)
-        .set({ categoryId: parsedCatId.data, updatedAt: new Date() })
-        .where(scoped.where(merchants, eq(merchants.id, existing.merchantId)));
-    } else if (merchant.categoryId !== parsedCatId.data) {
+    if (merchant?.categoryId && merchant.categoryId !== parsedCatId.data) {
       // Merchant already defaults to a different category. Since a merchant can
       // legitimately span multiple categories (e.g. Amazon), don't silently overwrite
       // that default for every other transaction from this merchant — surface the
@@ -100,6 +110,9 @@ export async function updateTransactionCategoryScoped(
 
   if (notFound) {
     return { error: "Transaction not found" };
+  }
+  if (categoryNotFound) {
+    return { error: "Category not found" };
   }
 
   revalidatePath("/transactions");
@@ -165,17 +178,31 @@ export async function bulkUpdateCategory(
   db: LedgrDb = defaultDb,
 ): Promise<{ success: true; updatedCount: number } | { error: string }> {
   const parsedIds = bulkIdsSchema.safeParse(transactionIds);
-  if (!parsedIds.success) {
+  const parsedCatId = categoryIdSchema.safeParse(categoryId);
+  if (!parsedIds.success || !parsedCatId.success) {
     return { error: "Invalid input: provide 1-500 transaction IDs" };
   }
 
   const auth = await authorizeAction();
   if ("error" in auth) return auth;
   const { householdId } = auth;
-  const updates = buildCategoryUpdate(categoryId);
+  const updates = buildCategoryUpdate(parsedCatId.data);
+  let categoryNotFound = false;
 
   const updatedCount = await withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
+    if (parsedCatId.data !== null) {
+      const [category] = await tx
+        .select({ id: categories.id })
+        .from(categories)
+        .where(scoped.where(categories, eq(categories.id, parsedCatId.data)))
+        .limit(1);
+      if (!category) {
+        categoryNotFound = true;
+        return 0;
+      }
+    }
+
     const owned = await tx
       .select({ id: transactions.id })
       .from(transactions)
@@ -192,9 +219,13 @@ export async function bulkUpdateCategory(
     const ownedIds = owned.map((r) => r.id);
     await tx.update(transactions)
       .set(updates)
-      .where(inArray(transactions.id, ownedIds));
+      .where(scoped.where(transactions, inArray(transactions.id, ownedIds)));
     return ownedIds.length;
   }, db);
+
+  if (categoryNotFound) {
+    return { error: "Category not found" };
+  }
 
   revalidatePath("/transactions");
   return { success: true, updatedCount };
