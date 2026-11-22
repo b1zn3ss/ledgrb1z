@@ -10,10 +10,16 @@ export const merchants = pgTable(
       .notNull()
       .references(() => households.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    identityStatus: text("identity_status", {
+      enum: ["legacy_unverified", "provider_verified", "user_verified", "retired"],
+    }).default("legacy_unverified").notNull(),
     rawNames: text("raw_names"),
     logoUrl: text("logo_url"),
     categoryId: text("category_id").references(() => categories.id, {
       onDelete: "set null",
+    }),
+    categoryDefaultApprovedAt: timestamp("category_default_approved_at", {
+      withTimezone: true,
     }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

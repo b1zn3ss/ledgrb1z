@@ -15,6 +15,9 @@ import { applyTransferDetection } from "@/lib/transfer-detection";
 import { computeInvestmentTransferTagging } from "@/lib/investment-transfer-tagging";
 import { applyRecurringDetection } from "@/lib/simplefin/recurring";
 import { withHousehold } from "@/lib/household-context";
+import { scopedQuery } from "@/lib/scoped-query";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
+import { resolveMerchantIdentityInTransaction } from "@/lib/merchant-identity/resolver";
 
 // SimpleFIN brokerages don't send a security type the way Plaid does. These
 // static lists cover the tickers common enough to be worth a dedicated
@@ -219,8 +222,10 @@ async function applyToDb(
 ): Promise<{ addedCount: number; modifiedCount: number }> {
   const now = new Date();
   const today = todayDateString();
+  const identityResolutionEnabled = isMerchantIdentityResolutionEnabled();
 
   return withHousehold(householdId, async (tx) => {
+    const scoped = scopedQuery(householdId, tx);
     const accountRows = await tx
       .select({ id: accounts.id, externalAccountId: accounts.externalAccountId, type: accounts.type })
       .from(accounts)
@@ -310,6 +315,28 @@ async function applyToDb(
       await tx.insert(transactions).values(insertRows);
     }
     const addedCount = insertRows.length;
+    if (identityResolutionEnabled) {
+      const identityRows = [...rowsWithAccount]
+        .sort((a, b) => a.row.externalId.localeCompare(b.row.externalId));
+      for (const { row, internalAccountId } of identityRows) {
+        const [identityTxn] = await tx.select({ id: transactions.id })
+          .from(transactions)
+          .where(scoped.where(
+            transactions,
+            eq(transactions.accountId, internalAccountId),
+            eq(transactions.externalId, row.externalId),
+            isNull(transactions.deletedAt),
+          ))
+          .limit(1);
+        if (!identityTxn) continue;
+        await resolveMerchantIdentityInTransaction(householdId, {
+          transactionId: identityTxn.id,
+          provider: "simplefin",
+          displayName: row.name,
+          aliasObservation: row.originalName,
+        }, tx);
+      }
+    }
 
     for (const balance of balances) {
       const internalId = externalToInternal.get(balance.externalAccountId);

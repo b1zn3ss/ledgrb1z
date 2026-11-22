@@ -33,8 +33,13 @@ export async function updateMerchantDefaultCategoryScoped(
       .limit(1);
     if (!category) return { error: "Category not found" } as const;
 
+    const now = new Date();
     const updated = await tx.update(merchants)
-      .set({ categoryId: parsedCategoryId.data, updatedAt: new Date() })
+      .set({
+        categoryId: parsedCategoryId.data,
+        categoryDefaultApprovedAt: now,
+        updatedAt: now,
+      })
       .where(scoped.where(merchants, eq(merchants.id, parsedMerchantId.data)))
       .returning({ id: merchants.id });
     if (updated.length === 0) return { error: "Merchant not found" } as const;

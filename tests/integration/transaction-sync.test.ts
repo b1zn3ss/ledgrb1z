@@ -21,11 +21,16 @@ import {
   accounts,
   transactions,
   transactionClassificationDecisions,
+  transactionMerchantIdentityDecisions,
   transactionSplits,
   merchants,
   syncLog,
 } from "@/db/schema";
 import type { LedgrDb } from "@/db";
+import {
+  applyMerchantIdentityDecision,
+  MERCHANT_IDENTITY_PRIORITY,
+} from "@/lib/merchant-identity/decision-writer";
 
 const categorizeWithAi = vi.hoisted(() => vi.fn(async () => ({ categorized: 0, skipped: 0 })));
 const resolveMerchantLogos = vi.hoisted(() => vi.fn(async () => ({ resolved: 0, skipped: 0 })));
@@ -121,6 +126,216 @@ describe("transaction sync integration", () => {
 
     expect(categorizeWithAi).not.toHaveBeenCalled();
     expect(resolveMerchantLogos).not.toHaveBeenCalled();
+  });
+
+  it("resolves a stable Plaid merchant entity across changing descriptions", async () => {
+    await setup();
+    await seedTestData(db);
+    const priorFlag = process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+    process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = "true";
+    let callCount = 0;
+    server.use(http.post("https://sandbox.plaid.com/transactions/sync", () => {
+      callCount++;
+      const transaction = {
+        transaction_id: TEST_TXN_IDS.added1,
+        account_id: "plaid-acc-checking",
+        amount: callCount === 1 ? 12.5 : 13.5,
+        iso_currency_code: "USD",
+        date: "2026-05-01",
+        name: callCount === 1 ? "ACME STORE #1001" : "ACME PURCHASE CHANGED",
+        merchant_name: callCount === 1 ? "Acme Store" : "Acme",
+        merchant_entity_id: "plaid-merchant-entity-stable",
+        counterparties: [],
+        logo_url: null,
+        pending: false,
+        pending_transaction_id: null,
+        personal_finance_category: null,
+      };
+      return HttpResponse.json({
+        added: callCount === 1 ? [transaction] : [],
+        modified: callCount === 1 ? [] : [transaction],
+        removed: [],
+        has_more: false,
+        next_cursor: `identity-cursor-${callCount}`,
+        request_id: `identity-request-${callCount}`,
+      });
+    }));
+
+    try {
+      await expect(syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db))
+        .resolves.toMatchObject({ success: true });
+      const [first] = await db.select().from(transactions)
+        .where(eq(transactions.externalId, TEST_TXN_IDS.added1));
+      expect(first.merchantId).toBeTruthy();
+
+      await expect(syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db))
+        .resolves.toMatchObject({ success: true });
+      const [updated] = await db.select().from(transactions)
+        .where(eq(transactions.externalId, TEST_TXN_IDS.added1));
+      const identityHistory = await db.select().from(transactionMerchantIdentityDecisions)
+        .where(eq(transactionMerchantIdentityDecisions.transactionId, updated.id));
+      const providerMerchants = await db.select().from(merchants)
+        .where(eq(merchants.identityStatus, "provider_verified"));
+      expect(updated.merchantId).toBe(first.merchantId);
+      expect(updated.amount).toBe(1350);
+      expect(identityHistory).toHaveLength(1);
+      expect(providerMerchants).toHaveLength(1);
+    } finally {
+      if (priorFlag === undefined) delete process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+      else process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = priorFlag;
+    }
+  });
+
+  it("keeps an identity-managed merchant link when the feature flag is disabled", async () => {
+    await setup();
+    await seedTestData(db);
+    const priorFlag = process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+    process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = "true";
+    let callCount = 0;
+    server.use(http.post("https://sandbox.plaid.com/transactions/sync", () => {
+      callCount++;
+      const transaction = {
+        transaction_id: TEST_TXN_IDS.added1,
+        account_id: "plaid-acc-checking",
+        amount: callCount === 1 ? 12.5 : 22.5,
+        iso_currency_code: "USD",
+        date: "2026-05-01",
+        name: callCount === 1 ? "IDENTITY MERCHANT" : "LEGACY COLLISION RAW",
+        merchant_name: callCount === 1 ? "Identity Merchant" : "Legacy Collision",
+        merchant_entity_id: callCount === 1 ? "flag-rollback-entity" : null,
+        counterparties: [],
+        logo_url: null,
+        pending: false,
+        pending_transaction_id: null,
+        personal_finance_category: null,
+      };
+      return HttpResponse.json({
+        added: callCount === 1 ? [transaction] : [],
+        modified: callCount === 1 ? [] : [transaction],
+        removed: [],
+        has_more: false,
+        next_cursor: `flag-rollback-cursor-${callCount}`,
+        request_id: `flag-rollback-request-${callCount}`,
+      });
+    }));
+
+    try {
+      await expect(syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db))
+        .resolves.toMatchObject({ success: true });
+      const [before] = await db.select().from(transactions)
+        .where(eq(transactions.externalId, TEST_TXN_IDS.added1));
+      expect(before.merchantIdentityDecisionId).toBeTruthy();
+
+      await db.insert(merchants).values({
+        id: uuid(),
+        householdId: HOUSEHOLD_ID,
+        name: "Legacy Collision",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = "false";
+      await expect(syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db))
+        .resolves.toMatchObject({ success: true });
+
+      const [after] = await db.select().from(transactions)
+        .where(eq(transactions.externalId, TEST_TXN_IDS.added1));
+      expect(after).toMatchObject({
+        merchantId: before.merchantId,
+        merchantIdentityDecisionId: before.merchantIdentityDecisionId,
+        amount: 2250,
+      });
+      const history = await db.select().from(transactionMerchantIdentityDecisions)
+        .where(eq(transactionMerchantIdentityDecisions.transactionId, after.id));
+      expect(history).toHaveLength(1);
+    } finally {
+      if (priorFlag === undefined) delete process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+      else process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = priorFlag;
+    }
+  });
+
+  it("inherits a pending manual-null merchant decision over posted provider evidence", async () => {
+    await setup();
+    await seedTestData(db);
+    const priorFlag = process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+    process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = "true";
+    const pendingId = uuid();
+    const now = new Date();
+    await db.insert(transactions).values({
+      id: pendingId,
+      accountId: "acc-internal-checking",
+      householdId: HOUSEHOLD_ID,
+      externalId: TEST_TXN_IDS.pending1,
+      provider: "plaid",
+      date: "2026-05-03",
+      originalName: "PENDING MERCHANT",
+      name: "Pending merchant",
+      amount: 3599,
+      normalizedAmount: -3599,
+      pending: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await applyMerchantIdentityDecision(HOUSEHOLD_ID, {
+      transactionId: pendingId,
+      merchantId: null,
+      source: "manual",
+      outcome: "cleared",
+      decisionPriority: MERCHANT_IDENTITY_PRIORITY.manual,
+      evidence: {
+        version: 1,
+        kind: "manual",
+        trigger: "clear",
+        merchant: null,
+      },
+    }, db);
+    server.use(http.post("https://sandbox.plaid.com/transactions/sync", () =>
+      HttpResponse.json({
+        added: [{
+          transaction_id: TEST_TXN_IDS.posted1,
+          account_id: "plaid-acc-checking",
+          amount: 35.99,
+          iso_currency_code: "USD",
+          date: "2026-05-03",
+          name: "POSTED MERCHANT",
+          merchant_name: "Posted Merchant",
+          merchant_entity_id: "posted-provider-entity",
+          counterparties: [],
+          logo_url: null,
+          pending: false,
+          pending_transaction_id: TEST_TXN_IDS.pending1,
+          personal_finance_category: null,
+        }],
+        modified: [],
+        removed: [],
+        has_more: false,
+        next_cursor: "identity-pending-cursor",
+        request_id: "identity-pending-request",
+      })));
+
+    try {
+      await expect(syncInstitution(PLAID_ITEM_ID, HOUSEHOLD_ID, db))
+        .resolves.toMatchObject({ success: true });
+      const [posted] = await db.select().from(transactions)
+        .where(eq(transactions.externalId, TEST_TXN_IDS.posted1));
+      const [decision] = await db.select().from(transactionMerchantIdentityDecisions)
+        .where(eq(
+          transactionMerchantIdentityDecisions.id,
+          posted.merchantIdentityDecisionId!,
+        ));
+      expect(posted.merchantId).toBeNull();
+      expect(decision).toMatchObject({
+        source: "manual",
+        outcome: "inherited",
+        merchantId: null,
+      });
+      expect(decision.evidence).toMatchObject({
+        kind: "inheritance",
+        pendingTransactionId: pendingId,
+      });
+    } finally {
+      if (priorFlag === undefined) delete process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED;
+      else process.env.MERCHANT_IDENTITY_RESOLUTION_ENABLED = priorFlag;
+    }
   });
 
   it("multi-page pagination drains all pages", async () => {

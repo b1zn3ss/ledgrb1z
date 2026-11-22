@@ -4,6 +4,7 @@ import { transactions, merchants, categoryRules, accounts, categories } from "@/
 import { scopedQuery } from "@/lib/scoped-query";
 import { notDeleted } from "@/lib/query-helpers";
 import { withHousehold } from "@/lib/household-context";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
 import { PFC_DETAILED_TO_CATEGORY } from "./pfc-map";
 import {
   applyClassificationDecisionInTransaction,
@@ -18,6 +19,7 @@ export interface CategorizableTransaction {
   merchantName: string | null;
   merchantCategoryId: string | null;
   merchantCategoryName?: string | null;
+  merchantCategoryApprovedAt?: Date | null;
   pfcDetailed: string | null;
 }
 
@@ -104,6 +106,7 @@ export function categorizeTransactions(
           kind: "merchant_default",
           category: { id: txn.merchantCategoryId, name: txn.merchantCategoryName ?? txn.merchantCategoryId },
           merchant: { id: txn.merchantId!, name: txn.merchantName ?? txn.merchantId! },
+          defaultApprovedAt: txn.merchantCategoryApprovedAt?.toISOString() ?? null,
         },
       });
       matched = true;
@@ -221,17 +224,33 @@ async function doCategorizeSyncedTransactions(
   const merchantIds = [...new Set(
     uncategorized.map((t) => t.merchantId).filter((id): id is string => id !== null),
   )];
-  const merchantMap = new Map<string, { name: string; categoryId: string | null; categoryName: string | null }>();
+  const requireApprovedMerchantDefaults = isMerchantIdentityResolutionEnabled();
+  const merchantMap = new Map<string, {
+    name: string;
+    categoryId: string | null;
+    categoryName: string | null;
+    categoryDefaultApprovedAt: Date | null;
+  }>();
   if (merchantIds.length > 0) {
     const merchantRows = await db
-      .select({ id: merchants.id, name: merchants.name, categoryId: merchants.categoryId })
+      .select({
+        id: merchants.id,
+        name: merchants.name,
+        categoryId: merchants.categoryId,
+        categoryDefaultApprovedAt: merchants.categoryDefaultApprovedAt,
+      })
       .from(merchants)
       .where(scoped.where(merchants, inArray(merchants.id, merchantIds)));
     for (const m of merchantRows) {
       merchantMap.set(m.id, {
         name: m.name,
-        categoryId: m.categoryId && categoryById.has(m.categoryId) ? m.categoryId : null,
+        categoryId: m.categoryId
+          && categoryById.has(m.categoryId)
+          && (!requireApprovedMerchantDefaults || m.categoryDefaultApprovedAt)
+          ? m.categoryId
+          : null,
         categoryName: m.categoryId ? categoryById.get(m.categoryId) ?? null : null,
+        categoryDefaultApprovedAt: m.categoryDefaultApprovedAt,
       });
     }
   }
@@ -245,6 +264,7 @@ async function doCategorizeSyncedTransactions(
       merchantName: merchant?.name ?? null,
       merchantCategoryId: merchant?.categoryId ?? null,
       merchantCategoryName: merchant?.categoryName ?? null,
+      merchantCategoryApprovedAt: merchant?.categoryDefaultApprovedAt ?? null,
       pfcDetailed: txn.pfcDetailed ?? null,
     };
   });

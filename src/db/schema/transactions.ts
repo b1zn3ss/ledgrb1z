@@ -6,6 +6,7 @@ import { merchants } from "./merchants";
 import { categories } from "./categories";
 import { recurringTransactions } from "./recurring";
 import { transactionClassificationDecisions } from "./classification-decisions";
+import { transactionMerchantIdentityDecisions } from "./merchant-identity";
 
 // `ai_low_confidence` is a real AI assignment, just one the model was unsure
 // of. An uncategorized row has to be edited by hand anyway, so a best guess is
@@ -81,7 +82,7 @@ export const transactions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     externalId: text("external_id"),
-    provider: text("provider", { enum: ["plaid", "simplefin", "csv", "manual"] }),
+    provider: text("provider", { enum: ["plaid", "simplefin", "csv", "ofx", "manual"] }),
     aiCategorizationAttemptedAt: timestamp("ai_categorization_attempted_at", { withTimezone: true }),
     merchantResolutionAttemptedAt: timestamp("merchant_resolution_attempted_at", { withTimezone: true }),
     pfcPrimary: text("pfc_primary"),
@@ -89,6 +90,10 @@ export const transactions = pgTable(
     categorySource: text("category_source"),
     classificationDecisionId: text("classification_decision_id").references(
       (): AnyPgColumn => transactionClassificationDecisions.id,
+      { onDelete: "set null" },
+    ),
+    merchantIdentityDecisionId: text("merchant_identity_decision_id").references(
+      (): AnyPgColumn => transactionMerchantIdentityDecisions.id,
       { onDelete: "set null" },
     ),
   },
