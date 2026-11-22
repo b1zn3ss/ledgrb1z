@@ -16,6 +16,8 @@ import {
 } from "@/lib/import/normalize";
 import { findDuplicates } from "@/lib/import/dedup";
 import { normalizeAmount } from "@/lib/money";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
+import { resolveMerchantIdentityInTransaction } from "@/lib/merchant-identity/resolver";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -49,6 +51,7 @@ export async function POST(request: Request) {
   const content = await file.text();
   const ext = file.name.split(".").pop()?.toLowerCase();
   const isOfx = ext === "ofx" || ext === "qfx";
+  const identityProvider: "ofx" | "csv" = isOfx ? "ofx" : "csv";
 
   if (step === "preview") {
     if (isOfx) {
@@ -173,6 +176,7 @@ export async function POST(request: Request) {
     }
 
     await withHousehold(householdId, async (tx) => {
+      const identityResolutionEnabled = isMerchantIdentityResolutionEnabled();
       for (const row of toInsert) {
         await tx.insert(transactions)
           .values({
@@ -185,7 +189,16 @@ export async function POST(request: Request) {
             amount: row.amount,
             normalizedAmount: normalizeAmount(row.amount),
             externalId: row.externalId,
+            ...(identityResolutionEnabled ? { provider: identityProvider } : {}),
           });
+        if (identityResolutionEnabled) {
+          await resolveMerchantIdentityInTransaction(householdId, {
+            transactionId: row.id,
+            provider: identityProvider,
+            displayName: row.name,
+            aliasObservation: row.originalName,
+          }, tx);
+        }
       }
     });
 

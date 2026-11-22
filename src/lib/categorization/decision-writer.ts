@@ -13,6 +13,7 @@ import {
 } from "@/db/schema";
 import { withHousehold } from "@/lib/household-context";
 import { scopedQuery } from "@/lib/scoped-query";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
 import { canonicalJson, classificationDecisionFingerprint } from "./fingerprint";
 import {
   classificationMatchValueHash,
@@ -198,6 +199,7 @@ export async function applyClassificationDecisionInTransaction(
       id: merchants.id,
       name: merchants.name,
       categoryId: merchants.categoryId,
+      categoryDefaultApprovedAt: merchants.categoryDefaultApprovedAt,
     })
       .from(merchants)
       .where(scoped.where(merchants, eq(merchants.id, input.merchantId)))
@@ -206,9 +208,16 @@ export async function applyClassificationDecisionInTransaction(
     if (!merchant || merchant.categoryId !== input.categoryId || txn.merchantId !== merchant.id) {
       throw new Error("Merchant not found");
     }
+    if (input.source === "merchant_default"
+      && isMerchantIdentityResolutionEnabled()
+      && !merchant.categoryDefaultApprovedAt) {
+      throw new Error("Merchant default is not explicitly approved");
+    }
     if (evidence.kind !== "merchant_default"
       || evidence.merchant.id !== merchant.id
-      || evidence.merchant.name !== merchant.name) {
+      || evidence.merchant.name !== merchant.name
+      || (evidence.defaultApprovedAt ?? null)
+        !== (merchant.categoryDefaultApprovedAt?.toISOString() ?? null)) {
       throw new Error("Merchant evidence does not match the owned merchant");
     }
   }

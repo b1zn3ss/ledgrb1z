@@ -30,6 +30,7 @@ export const classificationEvidenceSchema = z.discriminatedUnion("kind", [
   baseEvidenceSchema.extend({
     kind: z.literal("merchant_default"),
     merchant: z.object({ id: z.string(), name: z.string() }),
+    defaultApprovedAt: z.string().datetime().nullable().optional(),
   }),
   baseEvidenceSchema.extend({
     kind: z.literal("pfc"),

@@ -4,8 +4,17 @@ import { eq } from "drizzle-orm";
 import { createTestDb } from "./setup";
 import { server } from "../mocks/server";
 import { simplefinAccountsRevokedHandler } from "../mocks/handlers";
-import { bankConnections, accounts, transactions, institutionLogos } from "@/db/schema";
+import {
+  bankConnections,
+  accounts,
+  transactions,
+  institutionLogos,
+  transactionClassificationDecisions,
+  transactionMerchantIdentityDecisions,
+} from "@/db/schema";
 import { syncConnection } from "@/lib/simplefin/sync";
+import { approveMerchantAliasScoped } from "@/actions/merchant-identity";
+import { updateMerchantDefaultCategoryScoped } from "@/actions/merchants";
 import {
   insertHousehold,
   insertSimplefinConnection,
@@ -13,6 +22,7 @@ import {
   insertCategoryGroup,
   insertCategory,
   insertCategoryRule,
+  insertMerchant,
 } from "./helpers";
 import type { LedgrDb } from "@/db";
 
@@ -21,6 +31,7 @@ const resolveMerchantLogos = vi.hoisted(() => vi.fn(async () => ({ resolved: 0, 
 
 vi.mock("@/lib/ai/categorize", () => ({ categorizeWithAi }));
 vi.mock("@/lib/ai/resolve-merchants", () => ({ resolveMerchantLogos }));
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
 // MSW mocks fetch, not DNS — the SSRF guard in lib/simplefin/client.ts does a
 // real dns.lookup() before fetching, so it needs mocking too or these tests
@@ -97,6 +108,70 @@ describe("syncConnection", () => {
 
     const pending = txns.find((t) => t.externalId === "sf-txn-2")!;
     expect(pending.pending).toBe(true);
+  });
+
+  it("requires separate explicit approval before an aliased legacy merchant default is used", async () => {
+    vi.stubEnv("MERCHANT_IDENTITY_RESOLUTION_ENABLED", "true");
+    const { householdId, connectionId } = await setupWithAccount();
+    const { groupId } = await insertCategoryGroup(db, householdId, { name: "Alias group" });
+    const { categoryId } = await insertCategory(db, householdId, groupId, {
+      name: "Alias category",
+    });
+    const { merchantId } = await insertMerchant(db, householdId, {
+      name: "Coffee Shop",
+      categoryId,
+    });
+    await expect(approveMerchantAliasScoped(
+      householdId,
+      "simplefin-alias-owner",
+      merchantId,
+      "COFFEE SHOP PURCHASE",
+      "simplefin",
+      db,
+    )).resolves.toMatchObject({ success: true });
+
+    await expect(syncConnection(connectionId, householdId, db))
+      .resolves.toMatchObject({ success: true });
+    const [beforeApproval] = await db.select().from(transactions)
+      .where(eq(transactions.externalId, "sf-txn-1"));
+    expect(beforeApproval).toMatchObject({
+      merchantId,
+      categoryId: null,
+      categorySource: null,
+    });
+
+    await expect(updateMerchantDefaultCategoryScoped(
+      householdId,
+      merchantId,
+      categoryId,
+      db,
+    )).resolves.toEqual({ success: true });
+    await expect(syncConnection(connectionId, householdId, db))
+      .resolves.toMatchObject({ success: true });
+
+    const [transaction] = await db.select().from(transactions)
+      .where(eq(transactions.externalId, "sf-txn-1"));
+    const [identityDecision] = await db.select().from(transactionMerchantIdentityDecisions)
+      .where(eq(
+        transactionMerchantIdentityDecisions.id,
+        transaction.merchantIdentityDecisionId!,
+      ));
+    const [classificationDecision] = await db.select().from(transactionClassificationDecisions)
+      .where(eq(
+        transactionClassificationDecisions.id,
+        transaction.classificationDecisionId!,
+      ));
+    expect(transaction).toMatchObject({
+      merchantId,
+      categoryId,
+      categorySource: "merchant_default",
+    });
+    expect(identityDecision.source).toBe("approved_alias");
+    expect(classificationDecision).toMatchObject({
+      source: "merchant_default",
+      merchantId,
+      categoryId,
+    });
   });
 
   it("tags transactions on an investment account as isTransfer with transferSource investment_account", async () => {

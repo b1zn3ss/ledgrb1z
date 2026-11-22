@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid";
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, isNull } from "drizzle-orm";
 import { getPlaidClient } from "./client";
 import {
   PlaidRecurringResponseSchema,
@@ -10,11 +10,13 @@ import { titleCase } from "@/lib/text-utils";
 import type { LedgrDb } from "@/db";
 import { db as defaultDb } from "@/db";
 import { withHousehold } from "@/lib/household-context";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
 import {
   recurringTransactions,
   transactions,
   accounts,
   merchants,
+  transactionMerchantIdentityDecisions,
 } from "@/db/schema";
 
 type Frequency = "weekly" | "biweekly" | "semimonthly" | "monthly" | "yearly";
@@ -69,6 +71,7 @@ export async function syncRecurringTransactions(
     ];
 
     const now = new Date();
+    const identityResolutionEnabled = isMerchantIdentityResolutionEnabled();
     const seenStreamIds = new Set<string>();
 
     const result = await withHousehold(householdId, async (tx) => {
@@ -91,7 +94,30 @@ export async function syncRecurringTransactions(
           : null;
 
         let merchantId: string | null = null;
-        if (merchantName) {
+        if (identityResolutionEnabled) {
+          if (stream.transaction_ids.length > 0) {
+            const linked = await tx.select({
+              merchantId: transactions.merchantId,
+              source: transactionMerchantIdentityDecisions.source,
+            }).from(transactions)
+              .leftJoin(
+                transactionMerchantIdentityDecisions,
+                eq(
+                  transactionMerchantIdentityDecisions.id,
+                  transactions.merchantIdentityDecisionId,
+                ),
+              )
+              .where(and(
+                eq(transactions.householdId, householdId),
+                inArray(transactions.externalId, stream.transaction_ids),
+                isNull(transactions.deletedAt),
+              ));
+            const verifiedIds = new Set(linked
+              .filter((row) => row.merchantId && row.source && row.source !== "legacy_unknown")
+              .map((row) => row.merchantId!));
+            if (verifiedIds.size === 1) merchantId = [...verifiedIds][0];
+          }
+        } else if (merchantName) {
           merchantId = merchantNameToId.get(merchantName) ?? null;
           if (!merchantId) {
             merchantId = uuid();
@@ -117,7 +143,10 @@ export async function syncRecurringTransactions(
         const name = merchantName ?? titleCase(stream.description);
 
         const [existing] = await tx
-          .select({ id: recurringTransactions.id })
+          .select({
+            id: recurringTransactions.id,
+            merchantId: recurringTransactions.merchantId,
+          })
           .from(recurringTransactions)
           .where(eq(recurringTransactions.plaidStreamId, stream.stream_id))
           .limit(1);
@@ -129,7 +158,9 @@ export async function syncRecurringTransactions(
           await tx.update(recurringTransactions)
             .set({
               name,
-              merchantId,
+              // Lack of current verified evidence is not evidence that an
+              // existing recurring merchant link should be cleared.
+              merchantId: merchantId ?? existing.merchantId,
               accountId: internalAccountId,
               averageAmount,
               lastAmount,

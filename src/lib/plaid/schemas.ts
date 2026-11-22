@@ -8,6 +8,15 @@ export const PlaidTransactionSchema = z.object({
   date: z.string(),
   name: z.string(),
   merchant_name: z.string().nullable().optional(),
+  merchant_entity_id: z.string().nullable().optional(),
+  counterparties: z.array(z.object({
+    name: z.string(),
+    entity_id: z.string().nullable().optional(),
+    // Preserve documented values while tolerating future Plaid additions.
+    // Resolution below accepts only the exact values it understands.
+    type: z.string(),
+    confidence_level: z.string().nullable().optional(),
+  })).optional(),
   logo_url: z.string().nullable().optional(),
   pending: z.boolean(),
   pending_transaction_id: z.string().nullable().optional(),

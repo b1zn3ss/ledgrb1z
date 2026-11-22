@@ -7,6 +7,7 @@ export * from "./categories";
 export * from "./merchants";
 export * from "./transactions";
 export * from "./classification-decisions";
+export * from "./merchant-identity";
 export * from "./budgets";
 export * from "./recurring";
 export * from "./investments";

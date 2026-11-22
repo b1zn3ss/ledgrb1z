@@ -27,6 +27,16 @@ import { titleCase } from "@/lib/text-utils";
 import { cleanTransactionName } from "@/lib/import/clean-name";
 import { withHousehold } from "@/lib/household-context";
 import { scopedQuery } from "@/lib/scoped-query";
+import { isMerchantIdentityResolutionEnabled } from "@/lib/merchant-identity/flags";
+import {
+  resolveMerchantIdentityInTransaction,
+  type ProviderIdentifierCandidate,
+} from "@/lib/merchant-identity/resolver";
+import {
+  applyMerchantIdentityDecisionInTransaction,
+  MERCHANT_IDENTITY_PRIORITY,
+} from "@/lib/merchant-identity/decision-writer";
+import { plaidMerchantIdentityCandidates } from "./merchant-identity";
 import type { LedgrDb } from "@/db";
 import {
   bankConnections,
@@ -36,6 +46,7 @@ import {
   merchants,
   categories,
   transactionClassificationDecisions,
+  transactionMerchantIdentityDecisions,
   transactionSplits,
   CLASSIFICATION_DECISION_SOURCES,
   type ClassificationDecisionSource,
@@ -84,6 +95,7 @@ interface TransactionRow {
   pendingTransactionId: string | null;
   merchantName: string | null;
   logoUrl: string | null;
+  identityCandidates: ProviderIdentifierCandidate[];
   pfcPrimary: string | null;
   pfcDetailed: string | null;
   isTransfer: boolean;
@@ -200,6 +212,7 @@ export function processBatch(
       pendingTransactionId: txn.pending_transaction_id ?? null,
       merchantName: txn.merchant_name ? titleCase(txn.merchant_name) : null,
       logoUrl: txn.logo_url ?? null,
+      identityCandidates: plaidMerchantIdentityCandidates(txn),
       pfcPrimary: txn.personal_finance_category?.primary ?? null,
       pfcDetailed: txn.personal_finance_category?.detailed ?? null,
       isTransfer: ["TRANSFER_IN", "TRANSFER_OUT", "LOAN_PAYMENTS"].includes(
@@ -261,6 +274,7 @@ async function applyToDb(
   accountBalances: AccountBalanceInfo[] = [],
 ): Promise<{ addedCount: number; modifiedCount: number; removedCount: number }> {
   const now = new Date();
+  const identityResolutionEnabled = isMerchantIdentityResolutionEnabled();
 
   return withHousehold(householdId, async (tx) => {
     const scoped = scopedQuery(householdId, tx);
@@ -294,7 +308,8 @@ async function applyToDb(
     // SELECT per merchant. Existing rows still need per-row UPDATEs (each merges
     // a different rawNames set); new rows are bulk-inserted.
     const merchantNameToId = new Map<string, string>();
-    const upsertNames = processed.merchantUpserts.map((mu) => mu.normalizedName);
+    const merchantUpserts = identityResolutionEnabled ? [] : processed.merchantUpserts;
+    const upsertNames = merchantUpserts.map((mu) => mu.normalizedName);
     const existingMerchants = upsertNames.length
       ? await tx
           .select({ id: merchants.id, name: merchants.name, rawNames: merchants.rawNames })
@@ -309,7 +324,7 @@ async function applyToDb(
     const existingByName = new Map(existingMerchants.map((m) => [m.name, m]));
 
     const newMerchantRows: (typeof merchants.$inferInsert)[] = [];
-    for (const mu of processed.merchantUpserts) {
+    for (const mu of merchantUpserts) {
       const existing = existingByName.get(mu.normalizedName);
       if (existing) {
         // Merge raw names
@@ -352,9 +367,11 @@ async function applyToDb(
 
       if (row.pendingTransactionId) insertedPendingIds.add(row.pendingTransactionId);
 
-      const merchantId = row.merchantName
-        ? merchantNameToId.get(row.merchantName) ?? null
-        : null;
+      const merchantId = identityResolutionEnabled
+        ? null
+        : row.merchantName
+          ? merchantNameToId.get(row.merchantName) ?? null
+          : null;
 
       const isInvestmentAccount = typeByInternalId.get(internalAccountId) === "investment";
       const tagging = computeInvestmentTransferTagging(isInvestmentAccount, row.isTransfer);
@@ -398,30 +415,41 @@ async function applyToDb(
     const upsertExternalIds = upsertsWithAccount.map(({ row }) => row.externalId);
     const existingUpsertRows = upsertExternalIds.length
       ? await tx
-          .select({ id: transactions.id, externalId: transactions.externalId })
+          .select({
+            id: transactions.id,
+            externalId: transactions.externalId,
+            merchantIdentityDecisionId: transactions.merchantIdentityDecisionId,
+          })
           .from(transactions)
           .where(inArray(transactions.externalId, upsertExternalIds))
       : [];
-    const existingIdByExternalId = new Map(
-      existingUpsertRows.map((r) => [r.externalId, r.id]),
+    const existingByExternalId = new Map(
+      existingUpsertRows.map((r) => [r.externalId, r]),
     );
 
     const upsertInsertRows: (typeof transactions.$inferInsert)[] = [];
     for (const { row, internalAccountId } of upsertsWithAccount) {
-      const merchantId = row.merchantName
-        ? merchantNameToId.get(row.merchantName) ?? null
-        : null;
+      const merchantId = identityResolutionEnabled
+        ? null
+        : row.merchantName
+          ? merchantNameToId.get(row.merchantName) ?? null
+          : null;
 
       const isInvestmentAccount = typeByInternalId.get(internalAccountId) === "investment";
       const { isTransfer: computedIsTransfer, transferSource: computedTransferSource } =
         computeInvestmentTransferTagging(isInvestmentAccount, row.isTransfer);
 
-      const existingId = existingIdByExternalId.get(row.externalId);
-      if (existingId) {
+      const existing = existingByExternalId.get(row.externalId);
+      if (existing) {
         await tx.update(transactions)
           .set({
             accountId: internalAccountId,
-            merchantId,
+            // Disabling Phase 3 is the operational rollback. Preserve any
+            // identity-managed link so the legacy name path cannot invalidate
+            // its current decision pointer or overwrite a manual decision.
+            ...(identityResolutionEnabled || existing.merchantIdentityDecisionId
+              ? {}
+              : { merchantId }),
             date: row.date,
             originalName: row.originalName,
             name: row.name,
@@ -444,7 +472,7 @@ async function applyToDb(
             updatedAt: now,
             // Preserve user's manual categorization and reviewed status
           })
-          .where(eq(transactions.id, existingId));
+          .where(eq(transactions.id, existing.id));
       } else {
         upsertInsertRows.push({
           id: uuid(),
@@ -473,6 +501,31 @@ async function applyToDb(
     if (upsertInsertRows.length) {
       await tx.insert(transactions).values(upsertInsertRows);
     }
+    if (identityResolutionEnabled) {
+      const identityRows = [...processed.inserts, ...processed.upserts]
+        .sort((a, b) => a.externalId.localeCompare(b.externalId));
+      for (const row of identityRows) {
+        const internalAccountId = plaidToInternal.get(row.plaidAccountId);
+        if (!internalAccountId) continue;
+        const [identityTxn] = await tx.select({ id: transactions.id })
+          .from(transactions)
+          .where(scoped.where(
+            transactions,
+            eq(transactions.accountId, internalAccountId),
+            eq(transactions.externalId, row.externalId),
+            isNull(transactions.deletedAt),
+          ))
+          .limit(1);
+        if (!identityTxn) continue;
+        await resolveMerchantIdentityInTransaction(householdId, {
+          transactionId: identityTxn.id,
+          provider: "plaid",
+          displayName: row.merchantName ?? row.name,
+          aliasObservation: row.originalName,
+          identifiers: row.identityCandidates,
+        }, tx);
+      }
+    }
     const modifiedCount = upsertsWithAccount.length;
 
     // --- Soft-delete pending→posted replacements, inheriting category ---
@@ -489,6 +542,8 @@ async function applyToDb(
           categorySource: transactions.categorySource,
           reviewed: transactions.reviewed,
           classificationDecisionId: transactions.classificationDecisionId,
+          merchantId: transactions.merchantId,
+          merchantIdentityDecisionId: transactions.merchantIdentityDecisionId,
         })
         .from(transactions)
         .where(scoped.where(transactions, eq(transactions.externalId, pendingExternalId)))
@@ -498,6 +553,60 @@ async function applyToDb(
       await tx.update(transactions)
         .set({ deletedAt: now, updatedAt: now })
         .where(scoped.where(transactions, eq(transactions.externalId, pendingExternalId)));
+      if (pendingRow?.merchantIdentityDecisionId) {
+        const [sourceIdentity] = await tx.select({
+          id: transactionMerchantIdentityDecisions.id,
+          source: transactionMerchantIdentityDecisions.source,
+          fingerprint: transactionMerchantIdentityDecisions.fingerprint,
+          decisionPriority: transactionMerchantIdentityDecisions.decisionPriority,
+        }).from(transactionMerchantIdentityDecisions)
+          .where(scoped.where(
+            transactionMerchantIdentityDecisions,
+            eq(
+              transactionMerchantIdentityDecisions.id,
+              pendingRow.merchantIdentityDecisionId,
+            ),
+          ))
+          .limit(1);
+        const [postedIdentityTxn] = await tx.select({
+          id: transactions.id,
+          merchantId: transactions.merchantId,
+        }).from(transactions)
+          .where(scoped.where(
+            transactions,
+            eq(transactions.pendingTransactionId, pendingExternalId),
+            isNull(transactions.deletedAt),
+          ))
+          .limit(1);
+        const shouldInherit = sourceIdentity
+          && postedIdentityTxn
+          && (sourceIdentity.source === "manual" || postedIdentityTxn.merchantId === null);
+        if (shouldInherit) {
+          const [identityMerchant] = pendingRow.merchantId
+            ? await tx.select({ id: merchants.id, name: merchants.name })
+              .from(merchants)
+              .where(scoped.where(merchants, eq(merchants.id, pendingRow.merchantId)))
+              .limit(1)
+            : [];
+          await applyMerchantIdentityDecisionInTransaction(householdId, {
+            transactionId: postedIdentityTxn.id,
+            merchantId: identityMerchant?.id ?? null,
+            source: sourceIdentity.source === "manual" ? "manual" : "pending_inheritance",
+            outcome: "inherited",
+            decisionPriority: sourceIdentity.source === "manual"
+              ? MERCHANT_IDENTITY_PRIORITY.manual
+              : sourceIdentity.decisionPriority,
+            evidence: {
+              version: 1,
+              kind: "inheritance",
+              pendingTransactionId: pendingRow.id,
+              sourceDecisionId: sourceIdentity.id,
+              sourceFingerprint: sourceIdentity.fingerprint,
+              merchant: identityMerchant ?? null,
+            },
+          }, tx);
+        }
+      }
 
       // Preserve both a manual category and an explicit manual clear.
       if (pendingRow?.categorySource === "manual" || pendingRow?.categoryId) {

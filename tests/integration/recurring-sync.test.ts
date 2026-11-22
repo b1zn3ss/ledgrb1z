@@ -12,12 +12,17 @@ import {
   insertHousehold,
   insertPlaidItem,
   insertAccount,
+  insertMerchant,
   insertTransaction,
 } from "./helpers";
 import { recurringTransactions, transactions, merchants } from "../../src/db/schema";
 import { eq } from "drizzle-orm";
 import { resetPlaidClient } from "../../src/lib/plaid/client";
 import type { LedgrDb } from "../../src/db";
+import {
+  applyMerchantIdentityDecision,
+  MERCHANT_IDENTITY_PRIORITY,
+} from "../../src/lib/merchant-identity/decision-writer";
 
 let db: LedgrDb;
 let close: () => Promise<void>;
@@ -235,6 +240,53 @@ describe("syncRecurringTransactions", () => {
       .from(recurringTransactions)
       .where(eq(recurringTransactions.plaidStreamId, TEST_STREAM_IDS.salary));
     expect(txn!.recurringTransactionId).toBe(salary!.id);
+  });
+
+  it("uses one verified linked identity and never creates recurring merchants by name", async () => {
+    vi.stubEnv("MERCHANT_IDENTITY_RESOLUTION_ENABLED", "true");
+    const { householdId, plaidItemId, accountId } = await seedForSync(db);
+    const { merchantId } = await insertMerchant(db, householdId, {
+      name: "Verified Employer",
+      identityStatus: "user_verified",
+    });
+    const { transactionId } = await insertTransaction(db, householdId, accountId, {
+      externalId: TEST_TXN_IDS.added2,
+      provider: "plaid",
+    });
+    await applyMerchantIdentityDecision(householdId, {
+      transactionId,
+      merchantId,
+      source: "manual",
+      outcome: "assigned",
+      decisionPriority: MERCHANT_IDENTITY_PRIORITY.manual,
+      evidence: {
+        version: 1,
+        kind: "manual",
+        trigger: "single",
+        merchant: { id: merchantId, name: "Verified Employer" },
+      },
+    }, db);
+    server.use(recurringGetHandler);
+
+    const { syncRecurringTransactions } = await import(
+      "../../src/lib/plaid/recurring"
+    );
+    await syncRecurringTransactions(
+      plaidItemId,
+      householdId,
+      "access-sandbox-test-token",
+      db,
+    );
+
+    const rows = await db.select().from(recurringTransactions)
+      .where(eq(recurringTransactions.householdId, householdId));
+    const salary = rows.find((row) => row.plaidStreamId === TEST_STREAM_IDS.salary);
+    const netflix = rows.find((row) => row.plaidStreamId === TEST_STREAM_IDS.netflix);
+    expect(salary?.merchantId).toBe(merchantId);
+    expect(netflix?.merchantId).toBeNull();
+    const householdMerchants = await db.select().from(merchants)
+      .where(eq(merchants.householdId, householdId));
+    expect(householdMerchants).toHaveLength(1);
   });
 
   it("isolates recurring streams by household", async () => {
