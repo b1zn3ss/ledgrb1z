@@ -66,3 +66,16 @@ ENV HOSTNAME="0.0.0.0"
 
 ENTRYPOINT ["tini", "--"]
 CMD ["./docker-entrypoint.sh"]
+
+# Dedicated maintenance runner for operator-controlled jobs.
+# Built separately from the production application image.
+FROM deps AS maintenance
+
+WORKDIR /app
+
+COPY . .
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+CMD ["node", "--import", "tsx", "scripts/backfill-merchant-identities.ts"]
