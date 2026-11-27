@@ -28,6 +28,19 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
+# Dedicated maintenance runner for operator-controlled jobs.
+# Built separately from the production application image.
+FROM deps AS maintenance
+
+WORKDIR /app
+
+COPY . .
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+CMD ["node", "--import", "tsx", "scripts/backfill-merchant-identities.ts"]
+
 FROM base AS runner
 RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 # The runtime is pure node (entrypoint runs migrate.mjs then server.js), so npm
@@ -66,16 +79,3 @@ ENV HOSTNAME="0.0.0.0"
 
 ENTRYPOINT ["tini", "--"]
 CMD ["./docker-entrypoint.sh"]
-
-# Dedicated maintenance runner for operator-controlled jobs.
-# Built separately from the production application image.
-FROM deps AS maintenance
-
-WORKDIR /app
-
-COPY . .
-
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-
-CMD ["node", "--import", "tsx", "scripts/backfill-merchant-identities.ts"]
